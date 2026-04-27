@@ -47,8 +47,8 @@ ticketsRouter.post("/:key/transition", async (req, res) => {
         }
       } else if (row) {
         db.prepare(
-          "UPDATE events SET last_jira_status = ?, status = CASE WHEN ? != 'Selected for Development' THEN 'stale' ELSE status END, updated_at = datetime('now') WHERE jira_key = ?",
-        ).run(ticket.status, ticket.status, req.params.key);
+          "UPDATE events SET last_jira_status = ?, status = 'scheduled', updated_at = datetime('now') WHERE jira_key = ? AND status != 'completed'",
+        ).run(ticket.status, req.params.key);
       }
     }
 

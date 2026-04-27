@@ -12,6 +12,7 @@ import {
   type BusyInterval,
 } from "../services/graph.js";
 import { planSchedule, type ProposedBlock, type TicketForScheduling } from "../services/scheduler.js";
+import { resolveExistingEventForKey } from "../services/eventResolver.js";
 import { isSignedIn } from "../auth/msal.js";
 
 export const syncRouter = Router();
@@ -98,7 +99,7 @@ syncRouter.get("/preview", async (_req, res) => {
     }
 
     const existing = db
-      .prepare("SELECT * FROM events WHERE status = 'scheduled' AND end_utc > datetime('now')")
+      .prepare("SELECT * FROM events WHERE status != 'completed' AND end_utc > datetime('now')")
       .all() as EventRow[];
     const ownEventIds = new Set(existing.map((e) => e.graph_event_id));
     const replannableBusy = filterOutOwnEvents(busy, ownEventIds);
@@ -169,6 +170,8 @@ const ConfirmSchema = z.object({
   ),
 });
 
+type ConfirmAction = "created" | "patched" | "noop" | "adopted";
+
 syncRouter.post("/confirm", async (req, res) => {
   try {
     if (!isSignedIn()) {
@@ -177,42 +180,118 @@ syncRouter.post("/confirm", async (req, res) => {
     }
     const { blocks } = ConfirmSchema.parse(req.body);
 
-    const created: { jiraKey: string; graphEventId: string; webLink: string | null; action: "created" | "patched" | "noop" }[] = [];
+    const created: { jiraKey: string; graphEventId: string; webLink: string | null; action: ConfirmAction }[] = [];
 
     for (const b of blocks) {
       const url = `${(process.env.JIRA_BASE_URL || "").replace(/\/+$/, "")}/browse/${b.jiraKey}`;
       const subject = `[${b.jiraKey}] ${b.summary}`;
       const bodyHtml = buildBody({ key: b.jiraKey, url, estimateSeconds: b.durationMin * 60 });
 
-      if (b.existingGraphEventId) {
-        const existingRow = db
-          .prepare("SELECT * FROM events WHERE graph_event_id = ?")
-          .get(b.existingGraphEventId) as EventRow | undefined;
-        const sameTime =
-          existingRow?.start_utc === b.startUtcIso && existingRow?.end_utc === b.endUtcIso;
-        const sameShowAs = existingRow?.show_as === b.showAs;
-        if (existingRow && sameTime && sameShowAs) {
-          created.push({ jiraKey: b.jiraKey, graphEventId: b.existingGraphEventId, webLink: null, action: "noop" });
+      const resolved = await resolveExistingEventForKey(b.jiraKey);
+      const existingGraphEventId = b.existingGraphEventId ?? resolved?.graphEventId ?? null;
+
+      if (existingGraphEventId) {
+        const compareStart = resolved?.startUtcIso;
+        const compareEnd = resolved?.endUtcIso;
+        const compareShowAs = resolved?.showAs;
+        const sameTime = compareStart === b.startUtcIso && compareEnd === b.endUtcIso;
+        const sameShowAs = compareShowAs === b.showAs;
+
+        if (resolved && sameTime && sameShowAs) {
+          db.prepare(
+            `INSERT INTO events (jira_key, project_key, summary, graph_event_id, start_utc, end_utc, show_as, status, updated_at)
+             VALUES (@jira_key, @project_key, @summary, @graph_event_id, @start_utc, @end_utc, @show_as, 'scheduled', datetime('now'))
+             ON CONFLICT(jira_key) DO UPDATE SET
+               project_key = excluded.project_key,
+               summary = excluded.summary,
+               graph_event_id = excluded.graph_event_id,
+               start_utc = excluded.start_utc,
+               end_utc = excluded.end_utc,
+               show_as = excluded.show_as,
+               status = 'scheduled',
+               updated_at = datetime('now')`,
+          ).run({
+            jira_key: b.jiraKey,
+            project_key: b.projectKey,
+            summary: b.summary,
+            graph_event_id: existingGraphEventId,
+            start_utc: b.startUtcIso,
+            end_utc: b.endUtcIso,
+            show_as: b.showAs,
+          });
+          const action: ConfirmAction = resolved.source === "graph" && !b.existingGraphEventId ? "adopted" : "noop";
+          created.push({ jiraKey: b.jiraKey, graphEventId: existingGraphEventId, webLink: resolved.webLink, action });
           continue;
         }
-        await patchEvent(b.existingGraphEventId, {
-          startUtcIso: b.startUtcIso,
-          endUtcIso: b.endUtcIso,
-          showAs: b.showAs,
-          subject,
-          bodyHtml,
-        });
+
+        try {
+          await patchEvent(existingGraphEventId, {
+            startUtcIso: b.startUtcIso,
+            endUtcIso: b.endUtcIso,
+            showAs: b.showAs,
+            subject,
+            bodyHtml,
+          });
+        } catch (err: any) {
+          if (/Graph 404/.test(String(err?.message ?? ""))) {
+            db.prepare("DELETE FROM events WHERE graph_event_id = ?").run(existingGraphEventId);
+            const ev = await createEvent({
+              jiraKey: b.jiraKey,
+              subject,
+              bodyHtml,
+              startUtcIso: b.startUtcIso,
+              endUtcIso: b.endUtcIso,
+              showAs: b.showAs,
+            });
+            db.prepare(
+              `INSERT INTO events (jira_key, project_key, summary, graph_event_id, start_utc, end_utc, show_as, status, updated_at)
+               VALUES (@jira_key, @project_key, @summary, @graph_event_id, @start_utc, @end_utc, @show_as, 'scheduled', datetime('now'))
+               ON CONFLICT(jira_key) DO UPDATE SET
+                 project_key = excluded.project_key,
+                 summary = excluded.summary,
+                 graph_event_id = excluded.graph_event_id,
+                 start_utc = excluded.start_utc,
+                 end_utc = excluded.end_utc,
+                 show_as = excluded.show_as,
+                 status = 'scheduled',
+                 updated_at = datetime('now')`,
+            ).run({
+              jira_key: b.jiraKey,
+              project_key: b.projectKey,
+              summary: b.summary,
+              graph_event_id: ev.id,
+              start_utc: b.startUtcIso,
+              end_utc: b.endUtcIso,
+              show_as: b.showAs,
+            });
+            created.push({ jiraKey: b.jiraKey, graphEventId: ev.id, webLink: ev.webLink, action: "created" });
+            continue;
+          }
+          throw err;
+        }
+
         db.prepare(
-          `UPDATE events SET project_key = @project_key, summary = @summary, start_utc = @start_utc, end_utc = @end_utc, show_as = @show_as, status = 'scheduled', updated_at = datetime('now') WHERE graph_event_id = @graph_event_id`,
+          `INSERT INTO events (jira_key, project_key, summary, graph_event_id, start_utc, end_utc, show_as, status, updated_at)
+           VALUES (@jira_key, @project_key, @summary, @graph_event_id, @start_utc, @end_utc, @show_as, 'scheduled', datetime('now'))
+           ON CONFLICT(jira_key) DO UPDATE SET
+             project_key = excluded.project_key,
+             summary = excluded.summary,
+             graph_event_id = excluded.graph_event_id,
+             start_utc = excluded.start_utc,
+             end_utc = excluded.end_utc,
+             show_as = excluded.show_as,
+             status = 'scheduled',
+             updated_at = datetime('now')`,
         ).run({
+          jira_key: b.jiraKey,
           project_key: b.projectKey,
           summary: b.summary,
+          graph_event_id: existingGraphEventId,
           start_utc: b.startUtcIso,
           end_utc: b.endUtcIso,
           show_as: b.showAs,
-          graph_event_id: b.existingGraphEventId,
         });
-        created.push({ jiraKey: b.jiraKey, graphEventId: b.existingGraphEventId, webLink: null, action: "patched" });
+        created.push({ jiraKey: b.jiraKey, graphEventId: existingGraphEventId, webLink: resolved?.webLink ?? null, action: "patched" });
         continue;
       }
 
@@ -385,6 +464,75 @@ export async function runRescheduleSweep(): Promise<{
           to: `${block.startUtcIso} → ${block.endUtcIso}`,
         });
       } else {
+        const resolved = await resolveExistingEventForKey(block.jiraKey);
+        if (resolved) {
+          const sameTime =
+            resolved.startUtcIso === block.startUtcIso && resolved.endUtcIso === block.endUtcIso;
+          const sameShowAs = resolved.showAs === block.showAs;
+          if (sameTime && sameShowAs) {
+            db.prepare(
+              `INSERT INTO events (jira_key, project_key, summary, graph_event_id, start_utc, end_utc, show_as, status, updated_at)
+               VALUES (@jira_key, @project_key, @summary, @graph_event_id, @start_utc, @end_utc, @show_as, 'scheduled', datetime('now'))
+               ON CONFLICT(jira_key) DO UPDATE SET
+                 project_key = excluded.project_key,
+                 summary = excluded.summary,
+                 graph_event_id = excluded.graph_event_id,
+                 start_utc = excluded.start_utc,
+                 end_utc = excluded.end_utc,
+                 show_as = excluded.show_as,
+                 status = 'scheduled',
+                 updated_at = datetime('now')`,
+            ).run({
+              jira_key: block.jiraKey,
+              project_key: block.projectKey,
+              summary: block.summary,
+              graph_event_id: resolved.graphEventId,
+              start_utc: block.startUtcIso,
+              end_utc: block.endUtcIso,
+              show_as: block.showAs,
+            });
+            continue;
+          }
+          const oldRange = `${resolved.startUtcIso} → ${resolved.endUtcIso}`;
+          const noteHtml = `<p><strong>Rescheduled</strong> from ${escapeHtml(oldRange)} on ${new Date().toISOString()}${live ? ` — ticket still <em>${escapeHtml(live.status)}</em>.` : "."}</p>`;
+          await patchEvent(resolved.graphEventId, {
+            startUtcIso: block.startUtcIso,
+            endUtcIso: block.endUtcIso,
+            subject,
+            bodyHtml: noteHtml + baseBody,
+            showAs: block.showAs,
+          });
+          db.prepare(
+            `INSERT INTO events (jira_key, project_key, summary, graph_event_id, start_utc, end_utc, show_as, status, last_jira_status, updated_at)
+             VALUES (@jira_key, @project_key, @summary, @graph_event_id, @start_utc, @end_utc, @show_as, 'scheduled', @last_status, datetime('now'))
+             ON CONFLICT(jira_key) DO UPDATE SET
+               project_key = excluded.project_key,
+               summary = excluded.summary,
+               graph_event_id = excluded.graph_event_id,
+               start_utc = excluded.start_utc,
+               end_utc = excluded.end_utc,
+               show_as = excluded.show_as,
+               status = 'scheduled',
+               last_jira_status = excluded.last_jira_status,
+               updated_at = datetime('now')`,
+          ).run({
+            jira_key: block.jiraKey,
+            project_key: block.projectKey,
+            summary: block.summary,
+            graph_event_id: resolved.graphEventId,
+            start_utc: block.startUtcIso,
+            end_utc: block.endUtcIso,
+            show_as: block.showAs,
+            last_status: live?.status ?? null,
+          });
+          rescheduled.push({
+            jiraKey: block.jiraKey,
+            from: oldRange,
+            to: `${block.startUtcIso} → ${block.endUtcIso}`,
+          });
+          continue;
+        }
+
         const created = await createEvent({
           jiraKey: block.jiraKey,
           subject,
@@ -465,9 +613,7 @@ syncRouter.post("/schedule-one", async (req, res) => {
       .toISO()!;
     const busy = await listBusyIntervals(startUtc, endUtc);
 
-    const existingRow = db
-      .prepare("SELECT * FROM events WHERE jira_key = ?")
-      .get(jiraKey) as EventRow | undefined;
+    const resolved = await resolveExistingEventForKey(jiraKey);
 
     const single: TicketForScheduling = {
       key: ticket.key,
@@ -476,10 +622,8 @@ syncRouter.post("/schedule-one", async (req, res) => {
       estimateSeconds: ticket.estimateSeconds,
       priorityRank: priorityRank(ticket.priority, settings.priorityRanks),
       createdIso: ticket.created,
-      existingGraphEventId:
-        existingRow && existingRow.status === "scheduled" ? existingRow.graph_event_id : null,
-      existingShowAs:
-        existingRow && existingRow.status === "scheduled" ? existingRow.show_as : null,
+      existingGraphEventId: resolved?.graphEventId ?? null,
+      existingShowAs: resolved?.showAs ?? null,
     };
 
     const ownEventIds = new Set<string>();
@@ -507,25 +651,105 @@ syncRouter.post("/schedule-one", async (req, res) => {
       estimateSeconds: ticket.estimateSeconds ?? block.durationMin * 60,
     });
 
-    if (block.existingGraphEventId) {
-      await patchEvent(block.existingGraphEventId, {
-        startUtcIso: block.startUtcIso,
-        endUtcIso: block.endUtcIso,
-        showAs: block.showAs,
-        subject,
-        bodyHtml,
-      });
+    if (block.existingGraphEventId && resolved) {
+      const sameTime =
+        resolved.startUtcIso === block.startUtcIso && resolved.endUtcIso === block.endUtcIso;
+      const sameShowAs = resolved.showAs === block.showAs;
+      if (sameTime && sameShowAs) {
+        db.prepare(
+          `INSERT INTO events (jira_key, project_key, summary, graph_event_id, start_utc, end_utc, show_as, status, updated_at)
+           VALUES (@jira_key, @project_key, @summary, @graph_event_id, @start_utc, @end_utc, @show_as, 'scheduled', datetime('now'))
+           ON CONFLICT(jira_key) DO UPDATE SET
+             project_key = excluded.project_key,
+             summary = excluded.summary,
+             graph_event_id = excluded.graph_event_id,
+             start_utc = excluded.start_utc,
+             end_utc = excluded.end_utc,
+             show_as = excluded.show_as,
+             status = 'scheduled',
+             updated_at = datetime('now')`,
+        ).run({
+          jira_key: block.jiraKey,
+          project_key: block.projectKey,
+          summary: block.summary,
+          graph_event_id: block.existingGraphEventId,
+          start_utc: block.startUtcIso,
+          end_utc: block.endUtcIso,
+          show_as: block.showAs,
+        });
+        const action = resolved.source === "graph" ? "adopted" : "noop";
+        res.json({ ok: true, block, action, webLink: resolved.webLink });
+        return;
+      }
+
+      try {
+        await patchEvent(block.existingGraphEventId, {
+          startUtcIso: block.startUtcIso,
+          endUtcIso: block.endUtcIso,
+          showAs: block.showAs,
+          subject,
+          bodyHtml,
+        });
+      } catch (err: any) {
+        if (/Graph 404/.test(String(err?.message ?? ""))) {
+          db.prepare("DELETE FROM events WHERE graph_event_id = ?").run(block.existingGraphEventId);
+          const ev = await createEvent({
+            jiraKey: block.jiraKey,
+            subject,
+            bodyHtml,
+            startUtcIso: block.startUtcIso,
+            endUtcIso: block.endUtcIso,
+            showAs: block.showAs,
+          });
+          db.prepare(
+            `INSERT INTO events (jira_key, project_key, summary, graph_event_id, start_utc, end_utc, show_as, status, updated_at)
+             VALUES (@jira_key, @project_key, @summary, @graph_event_id, @start_utc, @end_utc, @show_as, 'scheduled', datetime('now'))
+             ON CONFLICT(jira_key) DO UPDATE SET
+               project_key = excluded.project_key,
+               summary = excluded.summary,
+               graph_event_id = excluded.graph_event_id,
+               start_utc = excluded.start_utc,
+               end_utc = excluded.end_utc,
+               show_as = excluded.show_as,
+               status = 'scheduled',
+               updated_at = datetime('now')`,
+          ).run({
+            jira_key: block.jiraKey,
+            project_key: block.projectKey,
+            summary: block.summary,
+            graph_event_id: ev.id,
+            start_utc: block.startUtcIso,
+            end_utc: block.endUtcIso,
+            show_as: block.showAs,
+          });
+          res.json({ ok: true, block, action: "created", webLink: ev.webLink });
+          return;
+        }
+        throw err;
+      }
+
       db.prepare(
-        `UPDATE events SET project_key = @project_key, summary = @summary, start_utc = @start_utc, end_utc = @end_utc, show_as = @show_as, status = 'scheduled', updated_at = datetime('now') WHERE graph_event_id = @graph_event_id`,
+        `INSERT INTO events (jira_key, project_key, summary, graph_event_id, start_utc, end_utc, show_as, status, updated_at)
+         VALUES (@jira_key, @project_key, @summary, @graph_event_id, @start_utc, @end_utc, @show_as, 'scheduled', datetime('now'))
+         ON CONFLICT(jira_key) DO UPDATE SET
+           project_key = excluded.project_key,
+           summary = excluded.summary,
+           graph_event_id = excluded.graph_event_id,
+           start_utc = excluded.start_utc,
+           end_utc = excluded.end_utc,
+           show_as = excluded.show_as,
+           status = 'scheduled',
+           updated_at = datetime('now')`,
       ).run({
+        jira_key: block.jiraKey,
         project_key: block.projectKey,
         summary: block.summary,
+        graph_event_id: block.existingGraphEventId,
         start_utc: block.startUtcIso,
         end_utc: block.endUtcIso,
         show_as: block.showAs,
-        graph_event_id: block.existingGraphEventId,
       });
-      res.json({ ok: true, block, action: "patched" });
+      res.json({ ok: true, block, action: "patched", webLink: resolved.webLink });
       return;
     }
 
