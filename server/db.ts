@@ -49,6 +49,8 @@ db.exec(`
   );
 `);
 
+db.exec("UPDATE events SET status = 'scheduled' WHERE status = 'stale'");
+
 export type AccountRow = {
   home_account_id: string;
   username: string;

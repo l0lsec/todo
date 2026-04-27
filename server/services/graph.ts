@@ -24,6 +24,26 @@ async function gfetch(path: string, init: RequestInit = {}): Promise<any> {
   return text ? JSON.parse(text) : {};
 }
 
+async function gfetchAllowMissing(path: string, init: RequestInit = {}): Promise<any | null> {
+  const token = await acquireAccessToken();
+  const res = await fetch(`${GRAPH}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      Prefer: 'outlook.timezone="UTC"',
+      ...(init.headers ?? {}),
+    },
+  });
+  if (res.status === 404 || res.status === 410) return null;
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`Graph ${res.status} ${res.statusText} for ${path}: ${text}`);
+  }
+  return text ? JSON.parse(text) : {};
+}
+
 export type BusyInterval = { startUtc: string; endUtc: string; graphEventId?: string | null };
 
 export async function listBusyIntervals(
@@ -112,6 +132,79 @@ export async function patchEvent(
 
 export async function deleteEvent(eventId: string): Promise<void> {
   await gfetch(`/me/events/${encodeURIComponent(eventId)}`, { method: "DELETE" });
+}
+
+export type GraphEventLite = {
+  id: string;
+  startUtcIso: string;
+  endUtcIso: string;
+  showAs: "free" | "busy";
+  webLink: string | null;
+  isCancelled: boolean;
+};
+
+function toUtcIso(value: string | undefined | null): string | null {
+  if (!value) return null;
+  return value.endsWith("Z") ? value : `${value}Z`;
+}
+
+function normalizeShowAs(showAs: string | undefined): "free" | "busy" {
+  return showAs === "free" ? "free" : "busy";
+}
+
+export async function getEventById(eventId: string): Promise<GraphEventLite | null> {
+  const ev = await gfetchAllowMissing(
+    `/me/events/${encodeURIComponent(eventId)}?$select=id,start,end,showAs,webLink,isCancelled`,
+  );
+  if (!ev) return null;
+  const startUtcIso = toUtcIso(ev.start?.dateTime);
+  const endUtcIso = toUtcIso(ev.end?.dateTime);
+  if (!startUtcIso || !endUtcIso) return null;
+  return {
+    id: ev.id,
+    startUtcIso,
+    endUtcIso,
+    showAs: normalizeShowAs(ev.showAs),
+    webLink: ev.webLink ?? null,
+    isCancelled: !!ev.isCancelled,
+  };
+}
+
+export async function findEventByJiraKey(jiraKey: string): Promise<GraphEventLite | null> {
+  const escaped = jiraKey.replace(/'/g, "''");
+  const filter =
+    `singleValueExtendedProperties/Any(ep: ep/id eq '${JIRA_KEY_PROP_ID}' and ep/value eq '${escaped}')`;
+  const expand =
+    `singleValueExtendedProperties($filter=id eq '${JIRA_KEY_PROP_ID}')`;
+  const path =
+    `/me/events?$filter=${encodeURIComponent(filter)}` +
+    `&$expand=${encodeURIComponent(expand)}` +
+    `&$select=id,start,end,showAs,webLink,isCancelled` +
+    `&$orderby=${encodeURIComponent("start/dateTime asc")}` +
+    `&$top=25`;
+  const page = await gfetch(path);
+  const candidates = (page.value ?? []) as any[];
+  const nowMs = Date.now();
+  let best: GraphEventLite | null = null;
+  for (const ev of candidates) {
+    if (ev.isCancelled) continue;
+    const startUtcIso = toUtcIso(ev.start?.dateTime);
+    const endUtcIso = toUtcIso(ev.end?.dateTime);
+    if (!startUtcIso || !endUtcIso) continue;
+    const lite: GraphEventLite = {
+      id: ev.id,
+      startUtcIso,
+      endUtcIso,
+      showAs: normalizeShowAs(ev.showAs),
+      webLink: ev.webLink ?? null,
+      isCancelled: false,
+    };
+    if (Date.parse(endUtcIso) > nowMs) {
+      return lite;
+    }
+    if (!best) best = lite;
+  }
+  return best;
 }
 
 export async function getMe(): Promise<{ displayName: string; mail: string }> {
