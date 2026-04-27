@@ -19,6 +19,7 @@ export type Settings = {
   ticketStatus: string;
   completedStatuses: string[];
   cronSchedule: string;
+  priorityRanks: Record<string, number>;
 };
 
 export type Project = {
@@ -34,7 +35,9 @@ export type Ticket = {
   summary: string;
   status: string;
   priority: string | null;
+  priorityRank?: number;
   estimateSeconds: number | null;
+  created?: string;
   url: string;
   alreadyScheduled?: boolean;
 };
@@ -47,6 +50,9 @@ export type ProposedBlock = {
   endUtcIso: string;
   durationMin: number;
   showAs: "free" | "busy";
+  priorityRank?: number;
+  existingGraphEventId?: string | null;
+  existingShowAs?: "free" | "busy" | null;
 };
 
 export type ExistingEvent = {
@@ -60,6 +66,12 @@ export type ExistingEvent = {
   graphEventId: string;
 };
 
+export type Move = {
+  jiraKey: string;
+  fromIso: string;
+  toIso: string;
+};
+
 export type Preview = {
   reason: null | "no_projects_selected";
   message?: string;
@@ -67,6 +79,7 @@ export type Preview = {
   blocks: ProposedBlock[];
   unscheduled: { jiraKey: string; reason: string }[];
   existing: ExistingEvent[];
+  moves?: Move[];
   windowStartIso?: string;
   windowEndIso?: string;
   settings?: Settings;

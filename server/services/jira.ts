@@ -62,6 +62,7 @@ export type JiraTicket = {
   status: string;
   priority: string | null;
   estimateSeconds: number | null;
+  created: string;
   url: string;
 };
 
@@ -74,6 +75,7 @@ const TicketsResponse = z.object({
         status: z.object({ name: z.string() }),
         priority: z.object({ name: z.string() }).nullable().optional(),
         project: z.object({ key: z.string() }),
+        created: z.string().optional(),
         timetracking: z
           .object({
             originalEstimateSeconds: z.number().optional(),
@@ -85,7 +87,7 @@ const TicketsResponse = z.object({
 });
 
 export async function searchTickets(jql: string): Promise<JiraTicket[]> {
-  const fields = ["summary", "status", "priority", "timetracking", "project"];
+  const fields = ["summary", "status", "priority", "timetracking", "project", "created"];
   const out: JiraTicket[] = [];
   let nextPageToken: string | undefined = undefined;
   const HARD_CAP = 500;
@@ -112,6 +114,7 @@ export async function searchTickets(jql: string): Promise<JiraTicket[]> {
         status: i.fields.status.name,
         priority: i.fields.priority?.name ?? null,
         estimateSeconds: i.fields.timetracking?.originalEstimateSeconds ?? null,
+        created: i.fields.created ?? new Date(0).toISOString(),
         url: `${baseUrl}/browse/${i.key}`,
       });
     }
@@ -125,7 +128,7 @@ export async function searchTickets(jql: string): Promise<JiraTicket[]> {
 export async function getTicket(key: string): Promise<JiraTicket | null> {
   try {
     const data = await jiraFetch(
-      `/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,status,priority,timetracking,project`,
+      `/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,status,priority,timetracking,project,created`,
     );
     return {
       key: data.key,
@@ -134,6 +137,7 @@ export async function getTicket(key: string): Promise<JiraTicket | null> {
       status: data.fields.status.name,
       priority: data.fields.priority?.name ?? null,
       estimateSeconds: data.fields.timetracking?.originalEstimateSeconds ?? null,
+      created: data.fields.created ?? new Date(0).toISOString(),
       url: `${baseUrl}/browse/${data.key}`,
     };
   } catch {
@@ -175,5 +179,5 @@ export function buildJql(opts: {
   if (opts.projectKeys.length > 0) {
     parts.push(`project in (${opts.projectKeys.join(",")})`);
   }
-  return parts.join(" AND ") + " ORDER BY priority DESC, created ASC";
+  return parts.join(" AND ");
 }

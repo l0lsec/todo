@@ -24,7 +24,7 @@ async function gfetch(path: string, init: RequestInit = {}): Promise<any> {
   return text ? JSON.parse(text) : {};
 }
 
-export type BusyInterval = { startUtc: string; endUtc: string };
+export type BusyInterval = { startUtc: string; endUtc: string; graphEventId?: string | null };
 
 export async function listBusyIntervals(
   startIso: string,
@@ -37,7 +37,7 @@ export async function listBusyIntervals(
     startIso,
   )}&endDateTime=${encodeURIComponent(
     endIso,
-  )}&$select=subject,start,end,showAs,isCancelled,type&$top=200`;
+  )}&$select=id,subject,start,end,showAs,isCancelled,type&$top=200`;
   while (url) {
     const page: any = await gfetch(url);
     for (const ev of page.value ?? []) {
@@ -46,6 +46,7 @@ export async function listBusyIntervals(
       out.push({
         startUtc: ev.start?.dateTime ? `${ev.start.dateTime}Z` : ev.start?.dateTime,
         endUtc: ev.end?.dateTime ? `${ev.end.dateTime}Z` : ev.end?.dateTime,
+        graphEventId: ev.id ?? null,
       });
     }
     const next = page["@odata.nextLink"] as string | undefined;

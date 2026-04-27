@@ -40,10 +40,25 @@ export const api = {
 
   preview: () => jfetch<Preview>("/api/sync/preview"),
   confirm: (blocks: ProposedBlock[]) =>
-    jfetch<{ ok: true; created: { jiraKey: string; graphEventId: string; webLink: string | null }[] }>(
-      "/api/sync/confirm",
-      { method: "POST", body: JSON.stringify({ blocks }) },
-    ),
+    jfetch<{
+      ok: true;
+      created: {
+        jiraKey: string;
+        graphEventId: string;
+        webLink: string | null;
+        action: "created" | "patched" | "noop";
+      }[];
+    }>("/api/sync/confirm", { method: "POST", body: JSON.stringify({ blocks }) }),
+  scheduleOne: (jiraKey: string, lookaheadBusinessDays?: number) =>
+    jfetch<{
+      ok: true;
+      block: ProposedBlock;
+      action: "created" | "patched";
+      webLink?: string | null;
+    }>("/api/sync/schedule-one", {
+      method: "POST",
+      body: JSON.stringify({ jiraKey, lookaheadBusinessDays }),
+    }),
   reschedule: () =>
     jfetch<{
       rescheduled: { jiraKey: string; from: string; to: string }[];

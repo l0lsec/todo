@@ -10,5 +10,18 @@
   "selectedProjectKeys": [],
   "ticketStatus": "Selected for Development",
   "completedStatuses": ["Done", "In Review", "Closed", "Resolved"],
-  "cronSchedule": "0 7 * * 1-5"
+  "cronSchedule": "0 7 * * 1-5",
+  "priorityRanks": {
+    "highest": 1,
+    "critical": 1,
+    "blocker": 1,
+    "high": 2,
+    "major": 2,
+    "medium": 3,
+    "normal": 3,
+    "low": 4,
+    "minor": 4,
+    "lowest": 5,
+    "trivial": 5
+  }
 }
