@@ -93,6 +93,7 @@ syncRouter.get("/preview", async (_req, res) => {
         blocks: [],
         unscheduled: [],
         existing: [],
+        busy: [],
         moves: [],
       });
       return;
@@ -144,6 +145,10 @@ syncRouter.get("/preview", async (_req, res) => {
           status: e.status,
           graphEventId: e.graph_event_id,
         })),
+      busy: replannableBusy.map((b) => ({
+        startUtcIso: b.startUtc,
+        endUtcIso: b.endUtc,
+      })),
       moves,
       windowStartIso: result.windowStartIso,
       windowEndIso: result.windowEndIso,
@@ -585,7 +590,54 @@ const ScheduleOneSchema = z.object({
   lookaheadBusinessDays: z.number().int().min(1).max(120).optional(),
 });
 
+const ScheduleAtSchema = z.object({
+  jiraKey: z.string().min(1),
+  startUtcIso: z.string().min(1),
+  durationMin: z.number().int().min(15).max(24 * 60).optional(),
+  showAs: z.enum(["free", "busy"]).optional(),
+});
+
 const FORCE_SCHEDULE_DEFAULT_LOOKAHEAD = 60;
+
+function computeDurationMin(estimateSeconds: number | null, settings: Settings): number {
+  const baseSec = estimateSeconds && estimateSeconds > 0
+    ? estimateSeconds
+    : settings.defaultEstimateMinutes * 60;
+  const min = Math.ceil(baseSec / 60);
+  return Math.max(settings.minSlotMinutes, Math.ceil(min / 30) * 30);
+}
+
+function upsertEventRow(args: {
+  jiraKey: string;
+  projectKey: string;
+  summary: string;
+  graphEventId: string;
+  startUtcIso: string;
+  endUtcIso: string;
+  showAs: "free" | "busy";
+}): void {
+  db.prepare(
+    `INSERT INTO events (jira_key, project_key, summary, graph_event_id, start_utc, end_utc, show_as, status, updated_at)
+     VALUES (@jira_key, @project_key, @summary, @graph_event_id, @start_utc, @end_utc, @show_as, 'scheduled', datetime('now'))
+     ON CONFLICT(jira_key) DO UPDATE SET
+       project_key = excluded.project_key,
+       summary = excluded.summary,
+       graph_event_id = excluded.graph_event_id,
+       start_utc = excluded.start_utc,
+       end_utc = excluded.end_utc,
+       show_as = excluded.show_as,
+       status = 'scheduled',
+       updated_at = datetime('now')`,
+  ).run({
+    jira_key: args.jiraKey,
+    project_key: args.projectKey,
+    summary: args.summary,
+    graph_event_id: args.graphEventId,
+    start_utc: args.startUtcIso,
+    end_utc: args.endUtcIso,
+    show_as: args.showAs,
+  });
+}
 
 syncRouter.post("/schedule-one", async (req, res) => {
   try {
@@ -781,6 +833,122 @@ syncRouter.post("/schedule-one", async (req, res) => {
       start_utc: block.startUtcIso,
       end_utc: block.endUtcIso,
       show_as: block.showAs,
+    });
+    res.json({ ok: true, block, action: "created", webLink: ev.webLink });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+syncRouter.post("/schedule-at", async (req, res) => {
+  try {
+    if (!isSignedIn()) {
+      res.status(401).json({ error: "Not signed in to Microsoft" });
+      return;
+    }
+    const parsed = ScheduleAtSchema.parse(req.body);
+    const settings = readSettings();
+    const ticket = await getTicket(parsed.jiraKey);
+    if (!ticket) {
+      res.status(404).json({ error: `Jira ticket ${parsed.jiraKey} not found` });
+      return;
+    }
+
+    const startDt = DateTime.fromISO(parsed.startUtcIso, { zone: "utc" });
+    if (!startDt.isValid) {
+      res.status(400).json({ error: "Invalid startUtcIso" });
+      return;
+    }
+    const durationMin =
+      parsed.durationMin ?? computeDurationMin(ticket.estimateSeconds, settings);
+    const endDt = startDt.plus({ minutes: durationMin });
+    const startUtcIso = startDt.toUTC().toISO()!;
+    const endUtcIso = endDt.toUTC().toISO()!;
+
+    const resolved = await resolveExistingEventForKey(ticket.key);
+    const showAs: "free" | "busy" =
+      parsed.showAs ?? resolved?.showAs ?? settings.defaultShowAs;
+
+    const url = `${(process.env.JIRA_BASE_URL || "").replace(/\/+$/, "")}/browse/${ticket.key}`;
+    const subject = `[${ticket.key}] ${ticket.summary}`;
+    const bodyHtml = buildBody({
+      key: ticket.key,
+      url,
+      estimateSeconds: ticket.estimateSeconds ?? durationMin * 60,
+    });
+
+    const block: ProposedBlock = {
+      jiraKey: ticket.key,
+      projectKey: ticket.projectKey,
+      summary: ticket.summary,
+      startUtcIso,
+      endUtcIso,
+      durationMin,
+      showAs,
+      priorityRank: priorityRank(ticket.priority, settings.priorityRanks),
+      existingGraphEventId: resolved?.graphEventId ?? null,
+      existingShowAs: resolved?.showAs ?? null,
+    };
+
+    if (resolved) {
+      const sameTime = resolved.startUtcIso === startUtcIso && resolved.endUtcIso === endUtcIso;
+      const sameShowAs = resolved.showAs === showAs;
+      if (sameTime && sameShowAs) {
+        upsertEventRow({
+          jiraKey: ticket.key,
+          projectKey: ticket.projectKey,
+          summary: ticket.summary,
+          graphEventId: resolved.graphEventId,
+          startUtcIso,
+          endUtcIso,
+          showAs,
+        });
+        const action = resolved.source === "graph" ? "adopted" : "noop";
+        res.json({ ok: true, block, action, webLink: resolved.webLink });
+        return;
+      }
+
+      try {
+        await patchEvent(resolved.graphEventId, {
+          startUtcIso,
+          endUtcIso,
+          showAs,
+          subject,
+          bodyHtml,
+        });
+        upsertEventRow({
+          jiraKey: ticket.key,
+          projectKey: ticket.projectKey,
+          summary: ticket.summary,
+          graphEventId: resolved.graphEventId,
+          startUtcIso,
+          endUtcIso,
+          showAs,
+        });
+        res.json({ ok: true, block, action: "patched", webLink: resolved.webLink });
+        return;
+      } catch (err: any) {
+        if (!/Graph 404/.test(String(err?.message ?? ""))) throw err;
+        db.prepare("DELETE FROM events WHERE graph_event_id = ?").run(resolved.graphEventId);
+      }
+    }
+
+    const ev = await createEvent({
+      jiraKey: ticket.key,
+      subject,
+      bodyHtml,
+      startUtcIso,
+      endUtcIso,
+      showAs,
+    });
+    upsertEventRow({
+      jiraKey: ticket.key,
+      projectKey: ticket.projectKey,
+      summary: ticket.summary,
+      graphEventId: ev.id,
+      startUtcIso,
+      endUtcIso,
+      showAs,
     });
     res.json({ ok: true, block, action: "created", webLink: ev.webLink });
   } catch (err: any) {

@@ -72,6 +72,11 @@ export type Move = {
   toIso: string;
 };
 
+export type BusyInterval = {
+  startUtcIso: string;
+  endUtcIso: string;
+};
+
 export type Preview = {
   reason: null | "no_projects_selected";
   message?: string;
@@ -79,6 +84,7 @@ export type Preview = {
   blocks: ProposedBlock[];
   unscheduled: { jiraKey: string; reason: string }[];
   existing: ExistingEvent[];
+  busy?: BusyInterval[];
   moves?: Move[];
   windowStartIso?: string;
   windowEndIso?: string;
