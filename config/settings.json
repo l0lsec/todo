@@ -1,0 +1,21 @@
+{
+  "timezone": "America/New_York",
+  "workdayStart": "09:00",
+  "workdayEnd": "18:00",
+  "bufferMinutes": 15,
+  "minSlotMinutes": 30,
+  "lookaheadBusinessDays": 5,
+  "defaultEstimateMinutes": 60,
+  "defaultShowAs": "free",
+  "selectedProjectKeys": [
+    "SUSO"
+  ],
+  "ticketStatus": "Selected for Development",
+  "completedStatuses": [
+    "Done",
+    "In Review",
+    "Closed",
+    "Resolved"
+  ],
+  "cronSchedule": "0 7 * * 1-5"
+}
