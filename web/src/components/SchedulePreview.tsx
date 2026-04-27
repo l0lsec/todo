@@ -33,6 +33,8 @@ export function SchedulePreview({
   onChangeStatus,
   onError,
   onDeleteExisting,
+  onConfirmBlock,
+  confirmingKeys,
 }: {
   blocks: ProposedBlock[];
   existing: ExistingEvent[];
@@ -42,6 +44,8 @@ export function SchedulePreview({
   onChangeStatus: (jiraKey: string, status: string) => void;
   onError: (msg: string) => void;
   onDeleteExisting: (jiraKey: string) => void;
+  onConfirmBlock: (block: ProposedBlock) => void;
+  confirmingKeys: Set<string>;
 }) {
   const ticketByKey = useMemo(() => {
     const m = new Map<string, Ticket>();
@@ -115,6 +119,8 @@ export function SchedulePreview({
                     onChangeShowAs={onChangeShowAs}
                     onChangeStatus={onChangeStatus}
                     onError={onError}
+                    onConfirm={onConfirmBlock}
+                    isConfirming={confirmingKeys.has(r.block.jiraKey)}
                   />
                 ) : (
                   <ExistingRow
@@ -139,46 +145,62 @@ function ProposedRow({
   onChangeShowAs,
   onChangeStatus,
   onError,
+  onConfirm,
+  isConfirming,
 }: {
   row: Extract<Row, { kind: "proposed" }>;
   onChangeShowAs: (key: string, showAs: "free" | "busy") => void;
   onChangeStatus: (key: string, status: string) => void;
   onError: (msg: string) => void;
+  onConfirm: (block: ProposedBlock) => void;
+  isConfirming: boolean;
 }) {
   const { block, ticket } = row;
   const start = new Date(block.startUtcIso);
   const end = new Date(block.endUtcIso);
   return (
-    <li className="flex items-center gap-3 py-1.5">
-      <div className="w-32 text-xs font-mono text-slate-500">
+    <li className="flex items-start gap-3 py-1.5">
+      <div className="w-32 shrink-0 text-xs font-mono text-slate-500 pt-0.5">
         {timeFmt.format(start)} – {timeFmt.format(end)}
       </div>
-      <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-sky-100 text-sky-800 border border-sky-200">
+      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-sky-100 text-sky-800 border border-sky-200">
         NEW
       </span>
-      <span className="font-mono text-xs text-slate-500">{block.projectKey}</span>
+      <span className="shrink-0 mt-0.5 font-mono text-xs text-slate-500">{block.projectKey}</span>
       <a
         href={ticket?.url ?? "#"}
         target="_blank"
         rel="noreferrer"
-        className="font-mono text-xs text-sky-700 hover:underline"
+        className="shrink-0 mt-0.5 font-mono text-xs text-sky-700 hover:underline"
       >
         {block.jiraKey}
       </a>
-      <span className="flex-1 truncate text-sm">{block.summary}</span>
-      <span className="text-xs text-slate-500">{block.durationMin}m</span>
-      <FreeBusyToggle
-        value={block.showAs}
-        onChange={(v) => onChangeShowAs(block.jiraKey, v)}
-      />
-      {ticket && (
-        <StatusPill
-          jiraKey={block.jiraKey}
-          status={ticket.status}
-          onChange={(s) => onChangeStatus(block.jiraKey, s)}
-          onError={onError}
+      <span className="flex-1 min-w-0 break-words text-sm">{block.summary}</span>
+      <span className="shrink-0 mt-0.5 text-xs text-slate-500">{block.durationMin}m</span>
+      <div className="shrink-0">
+        <FreeBusyToggle
+          value={block.showAs}
+          onChange={(v) => onChangeShowAs(block.jiraKey, v)}
         />
+      </div>
+      {ticket && (
+        <div className="shrink-0">
+          <StatusPill
+            jiraKey={block.jiraKey}
+            status={ticket.status}
+            onChange={(s) => onChangeStatus(block.jiraKey, s)}
+            onError={onError}
+          />
+        </div>
       )}
+      <button
+        onClick={() => onConfirm(block)}
+        disabled={isConfirming}
+        title="Schedule just this ticket"
+        className="shrink-0 text-xs px-2 py-1 rounded bg-slate-900 text-white hover:bg-slate-700 disabled:opacity-50"
+      >
+        {isConfirming ? "Scheduling…" : "Schedule"}
+      </button>
     </li>
   );
 }
@@ -198,40 +220,44 @@ function ExistingRow({
   const start = new Date(event.startUtcIso);
   const end = new Date(event.endUtcIso);
   return (
-    <li className="flex items-center gap-3 py-1.5">
-      <div className="w-32 text-xs font-mono text-slate-500">
+    <li className="flex items-start gap-3 py-1.5">
+      <div className="w-32 shrink-0 text-xs font-mono text-slate-500 pt-0.5">
         {timeFmt.format(start)} – {timeFmt.format(end)}
       </div>
-      <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
+      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
         ON CAL
       </span>
-      <span className="font-mono text-xs text-slate-500">{event.projectKey ?? ""}</span>
+      <span className="shrink-0 mt-0.5 font-mono text-xs text-slate-500">{event.projectKey ?? ""}</span>
       <a
         href={ticket?.url ?? "#"}
         target="_blank"
         rel="noreferrer"
-        className="font-mono text-xs text-sky-700 hover:underline"
+        className="shrink-0 mt-0.5 font-mono text-xs text-sky-700 hover:underline"
       >
         {event.jiraKey}
       </a>
-      <span className="flex-1 truncate text-sm">{event.summary ?? ticket?.summary ?? ""}</span>
+      <span className="flex-1 min-w-0 break-words text-sm">
+        {event.summary ?? ticket?.summary ?? ""}
+      </span>
       <span
-        className={`text-xs px-1.5 py-0.5 rounded border ${event.showAs === "busy" ? "bg-amber-50 text-amber-800 border-amber-200" : "bg-emerald-50 text-emerald-800 border-emerald-200"}`}
+        className={`shrink-0 mt-0.5 text-xs px-1.5 py-0.5 rounded border ${event.showAs === "busy" ? "bg-amber-50 text-amber-800 border-amber-200" : "bg-emerald-50 text-emerald-800 border-emerald-200"}`}
       >
         {event.showAs}
       </span>
       {ticket && (
-        <StatusPill
-          jiraKey={event.jiraKey}
-          status={ticket.status}
-          onChange={(s) => onChangeStatus(event.jiraKey, s)}
-          onError={onError}
-        />
+        <div className="shrink-0">
+          <StatusPill
+            jiraKey={event.jiraKey}
+            status={ticket.status}
+            onChange={(s) => onChangeStatus(event.jiraKey, s)}
+            onError={onError}
+          />
+        </div>
       )}
       <button
         onClick={() => onDelete(event.jiraKey)}
         title="Remove this scheduled block"
-        className="text-xs text-rose-600 hover:text-rose-800"
+        className="shrink-0 mt-0.5 text-xs text-rose-600 hover:text-rose-800"
       >
         Remove
       </button>
