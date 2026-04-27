@@ -17,6 +17,7 @@ type Row =
       kind: "proposed";
       block: ProposedBlock;
       ticket: Ticket | undefined;
+      previousStartIso?: string;
     }
   | {
       kind: "existing";
@@ -53,12 +54,25 @@ export function SchedulePreview({
     return m;
   }, [tickets]);
 
+  const existingByKey = useMemo(() => {
+    const m = new Map<string, ExistingEvent>();
+    for (const e of existing) m.set(e.jiraKey, e);
+    return m;
+  }, [existing]);
+
+  const proposedKeys = useMemo(() => new Set(blocks.map((b) => b.jiraKey)), [blocks]);
+
   const grouped = useMemo(() => {
     const rows: Row[] = [
+      ...blocks.map<Row>((b) => ({
+        kind: "proposed",
+        block: b,
+        ticket: ticketByKey.get(b.jiraKey),
+        previousStartIso: existingByKey.get(b.jiraKey)?.startUtcIso,
+      })),
       ...existing
-        .filter((e) => e.status === "scheduled")
+        .filter((e) => e.status === "scheduled" && !proposedKeys.has(e.jiraKey))
         .map<Row>((e) => ({ kind: "existing", event: e, ticket: ticketByKey.get(e.jiraKey) })),
-      ...blocks.map<Row>((b) => ({ kind: "proposed", block: b, ticket: ticketByKey.get(b.jiraKey) })),
     ];
     rows.sort((a, b) => {
       const sa = a.kind === "proposed" ? a.block.startUtcIso : a.event.startUtcIso;
@@ -74,7 +88,7 @@ export function SchedulePreview({
       byDay.set(day, list);
     }
     return [...byDay.entries()];
-  }, [blocks, existing, ticketByKey]);
+  }, [blocks, existing, existingByKey, proposedKeys, ticketByKey]);
 
   if (grouped.length === 0) {
     return (
@@ -120,6 +134,7 @@ export function SchedulePreview({
                     onChangeStatus={onChangeStatus}
                     onError={onError}
                     onConfirm={onConfirmBlock}
+                    onDelete={onDeleteExisting}
                     isConfirming={confirmingKeys.has(r.block.jiraKey)}
                   />
                 ) : (
@@ -140,12 +155,50 @@ export function SchedulePreview({
   );
 }
 
+function PriorityPill({ priority }: { priority: string | null | undefined }) {
+  const label = priority ?? "None";
+  const key = (priority ?? "").trim().toLowerCase();
+  const styles = priorityStyles(key);
+  return (
+    <span
+      className={`shrink-0 mt-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded border ${styles}`}
+      title={`Priority: ${label}`}
+    >
+      {label}
+    </span>
+  );
+}
+
+function priorityStyles(key: string): string {
+  switch (key) {
+    case "highest":
+    case "critical":
+    case "blocker":
+      return "bg-rose-100 text-rose-800 border-rose-200";
+    case "high":
+    case "major":
+      return "bg-orange-100 text-orange-800 border-orange-200";
+    case "medium":
+    case "normal":
+      return "bg-slate-100 text-slate-700 border-slate-200";
+    case "low":
+    case "minor":
+      return "bg-sky-100 text-sky-800 border-sky-200";
+    case "lowest":
+    case "trivial":
+      return "bg-zinc-100 text-zinc-600 border-zinc-200";
+    default:
+      return "bg-slate-50 text-slate-500 border-slate-200";
+  }
+}
+
 function ProposedRow({
   row,
   onChangeShowAs,
   onChangeStatus,
   onError,
   onConfirm,
+  onDelete,
   isConfirming,
 }: {
   row: Extract<Row, { kind: "proposed" }>;
@@ -153,19 +206,36 @@ function ProposedRow({
   onChangeStatus: (key: string, status: string) => void;
   onError: (msg: string) => void;
   onConfirm: (block: ProposedBlock) => void;
+  onDelete: (key: string) => void;
   isConfirming: boolean;
 }) {
-  const { block, ticket } = row;
+  const { block, ticket, previousStartIso } = row;
   const start = new Date(block.startUtcIso);
   const end = new Date(block.endUtcIso);
+  const hasExisting = !!block.existingGraphEventId;
+  const moved = hasExisting && previousStartIso && previousStartIso !== block.startUtcIso;
+  const unchanged = hasExisting && previousStartIso === block.startUtcIso && (block.existingShowAs ?? null) === block.showAs;
+  const tagLabel = !hasExisting ? "NEW" : moved ? "MOVED" : "ON CAL";
+  const tagClass = !hasExisting
+    ? "bg-sky-100 text-sky-800 border-sky-200"
+    : moved
+      ? "bg-amber-100 text-amber-900 border-amber-200"
+      : "bg-emerald-100 text-emerald-800 border-emerald-200";
+  const movedTitle = moved && previousStartIso
+    ? `Moved from ${timeFmt.format(new Date(previousStartIso))} on ${dayFmtShort(previousStartIso)}`
+    : undefined;
   return (
     <li className="flex items-start gap-3 py-1.5">
       <div className="w-32 shrink-0 text-xs font-mono text-slate-500 pt-0.5">
         {timeFmt.format(start)} – {timeFmt.format(end)}
       </div>
-      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-sky-100 text-sky-800 border border-sky-200">
-        NEW
+      <span
+        className={`shrink-0 mt-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded border ${tagClass}`}
+        title={movedTitle}
+      >
+        {tagLabel}
       </span>
+      <PriorityPill priority={ticket?.priority ?? null} />
       <span className="shrink-0 mt-0.5 font-mono text-xs text-slate-500">{block.projectKey}</span>
       <a
         href={ticket?.url ?? "#"}
@@ -195,14 +265,27 @@ function ProposedRow({
       )}
       <button
         onClick={() => onConfirm(block)}
-        disabled={isConfirming}
-        title="Schedule just this ticket"
+        disabled={isConfirming || unchanged}
+        title={unchanged ? "Already on calendar at this time" : "Schedule just this ticket"}
         className="shrink-0 text-xs px-2 py-1 rounded bg-slate-900 text-white hover:bg-slate-700 disabled:opacity-50"
       >
-        {isConfirming ? "Scheduling…" : "Schedule"}
+        {isConfirming ? "Scheduling…" : hasExisting ? "Update" : "Schedule"}
       </button>
+      {hasExisting && (
+        <button
+          onClick={() => onDelete(block.jiraKey)}
+          title="Remove this scheduled block from your calendar"
+          className="shrink-0 mt-0.5 text-xs text-rose-600 hover:text-rose-800"
+        >
+          Cancel
+        </button>
+      )}
     </li>
   );
+}
+
+function dayFmtShort(iso: string): string {
+  return dayFmt.format(new Date(iso));
 }
 
 function ExistingRow({
@@ -227,6 +310,7 @@ function ExistingRow({
       <span className="shrink-0 mt-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
         ON CAL
       </span>
+      <PriorityPill priority={ticket?.priority ?? null} />
       <span className="shrink-0 mt-0.5 font-mono text-xs text-slate-500">{event.projectKey ?? ""}</span>
       <a
         href={ticket?.url ?? "#"}

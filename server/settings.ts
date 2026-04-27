@@ -6,6 +6,22 @@ const CONFIG_DIR = path.resolve(process.cwd(), "config");
 const SETTINGS_PATH = path.join(CONFIG_DIR, "settings.json");
 const DEFAULTS_PATH = path.join(CONFIG_DIR, "settings.default.json");
 
+export const DEFAULT_PRIORITY_RANK: Record<string, number> = {
+  highest: 1,
+  critical: 1,
+  blocker: 1,
+  high: 2,
+  major: 2,
+  medium: 3,
+  normal: 3,
+  low: 4,
+  minor: 4,
+  lowest: 5,
+  trivial: 5,
+};
+
+export const UNRANKED_PRIORITY_VALUE = 6;
+
 export const SettingsSchema = z.object({
   timezone: z.string().default("America/New_York"),
   workdayStart: z.string().regex(/^\d{2}:\d{2}$/).default("09:00"),
@@ -21,9 +37,20 @@ export const SettingsSchema = z.object({
     .array(z.string())
     .default(["Done", "In Review", "Closed", "Resolved"]),
   cronSchedule: z.string().default("0 7 * * 1-5"),
+  priorityRanks: z
+    .record(z.string(), z.number().int().min(1).max(99))
+    .default({ ...DEFAULT_PRIORITY_RANK }),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
+
+export function priorityRank(name: string | null, ranks: Record<string, number>): number {
+  if (!name) return UNRANKED_PRIORITY_VALUE;
+  const key = name.trim().toLowerCase();
+  if (key in ranks) return ranks[key]!;
+  if (key in DEFAULT_PRIORITY_RANK) return DEFAULT_PRIORITY_RANK[key]!;
+  return UNRANKED_PRIORITY_VALUE;
+}
 
 function ensureFile(): void {
   mkdirSync(CONFIG_DIR, { recursive: true });

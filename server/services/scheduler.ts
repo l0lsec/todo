@@ -7,6 +7,10 @@ export type TicketForScheduling = {
   projectKey: string;
   summary: string;
   estimateSeconds: number | null;
+  priorityRank: number;
+  createdIso: string;
+  existingGraphEventId?: string | null;
+  existingShowAs?: "free" | "busy" | null;
 };
 
 export type ProposedBlock = {
@@ -17,6 +21,9 @@ export type ProposedBlock = {
   endUtcIso: string;
   durationMin: number;
   showAs: "free" | "busy";
+  priorityRank: number;
+  existingGraphEventId: string | null;
+  existingShowAs: "free" | "busy" | null;
 };
 
 export type ScheduleResult = {
@@ -136,11 +143,15 @@ export function planSchedule(opts: {
   busy: BusyInterval[];
   settings: Settings;
   now?: DateTime;
-  reservedKeys?: Set<string>;
 }): ScheduleResult {
-  const { tickets, busy, settings } = opts;
+  const { busy, settings } = opts;
   const now = (opts.now ?? DateTime.utc()).toUTC();
-  const reservedKeys = opts.reservedKeys ?? new Set<string>();
+
+  const sorted = [...opts.tickets].sort((a, b) =>
+    a.priorityRank - b.priorityRank ||
+    a.createdIso.localeCompare(b.createdIso) ||
+    a.key.localeCompare(b.key),
+  );
 
   const windows = buildWorkingWindows(settings, now);
   const busyIntervals = busyToIntervals(busy, settings);
@@ -151,8 +162,7 @@ export function planSchedule(opts: {
   const blocks: ProposedBlock[] = [];
   const unscheduled: { jiraKey: string; reason: string }[] = [];
 
-  for (const t of tickets) {
-    if (reservedKeys.has(t.key)) continue;
+  for (const t of sorted) {
     const durMin = durationFor(t, settings);
     let placed = false;
     for (let idx = 0; idx < free.length; idx++) {
@@ -160,6 +170,7 @@ export function planSchedule(opts: {
       if (slot.length("minutes") < durMin) continue;
       const start = slot.start!;
       const end = start.plus({ minutes: durMin });
+      const showAs = t.existingShowAs ?? settings.defaultShowAs;
       blocks.push({
         jiraKey: t.key,
         projectKey: t.projectKey,
@@ -167,7 +178,10 @@ export function planSchedule(opts: {
         startUtcIso: start.toUTC().toISO()!,
         endUtcIso: end.toUTC().toISO()!,
         durationMin: durMin,
-        showAs: settings.defaultShowAs,
+        showAs,
+        priorityRank: t.priorityRank,
+        existingGraphEventId: t.existingGraphEventId ?? null,
+        existingShowAs: t.existingShowAs ?? null,
       });
       const remaining: Interval[] = [];
       if (end < slot.end!) {

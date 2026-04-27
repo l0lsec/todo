@@ -1,11 +1,17 @@
 import { Router } from "express";
 import { z } from "zod";
 import { DateTime } from "luxon";
-import { readSettings } from "../settings.js";
+import { readSettings, priorityRank, type Settings } from "../settings.js";
 import { db, type EventRow } from "../db.js";
 import { searchTickets, buildJql, getTicket, type JiraTicket } from "../services/jira.js";
-import { listBusyIntervals, createEvent, patchEvent, deleteEvent } from "../services/graph.js";
-import { planSchedule, type ProposedBlock } from "../services/scheduler.js";
+import {
+  listBusyIntervals,
+  createEvent,
+  patchEvent,
+  deleteEvent,
+  type BusyInterval,
+} from "../services/graph.js";
+import { planSchedule, type ProposedBlock, type TicketForScheduling } from "../services/scheduler.js";
 import { isSignedIn } from "../auth/msal.js";
 
 export const syncRouter = Router();
@@ -27,7 +33,7 @@ function buildBody(ticket: { key: string; url: string; estimateSeconds: number |
 async function gatherTicketsAndBusy() {
   const settings = readSettings();
   if (settings.selectedProjectKeys.length === 0) {
-    return { settings, tickets: [] as JiraTicket[], busy: [], reason: "no_projects_selected" as const };
+    return { settings, tickets: [] as JiraTicket[], busy: [] as BusyInterval[], reason: "no_projects_selected" as const };
   }
   const jql = buildJql({
     status: settings.ticketStatus,
@@ -42,6 +48,33 @@ async function gatherTicketsAndBusy() {
   const busy = await listBusyIntervals(startUtc, endUtc);
 
   return { settings, tickets, busy, reason: null };
+}
+
+function buildSchedulingInput(
+  tickets: JiraTicket[],
+  existing: EventRow[],
+  settings: Settings,
+): TicketForScheduling[] {
+  const eventByKey = new Map<string, EventRow>();
+  for (const e of existing) eventByKey.set(e.jira_key, e);
+  return tickets.map((t) => {
+    const ev = eventByKey.get(t.key);
+    return {
+      key: t.key,
+      projectKey: t.projectKey,
+      summary: t.summary,
+      estimateSeconds: t.estimateSeconds,
+      priorityRank: priorityRank(t.priority, settings.priorityRanks),
+      createdIso: t.created,
+      existingGraphEventId: ev?.graph_event_id ?? null,
+      existingShowAs: ev?.show_as ?? null,
+    };
+  });
+}
+
+function filterOutOwnEvents(busy: BusyInterval[], ownEventIds: Set<string>): BusyInterval[] {
+  if (ownEventIds.size === 0) return busy;
+  return busy.filter((b) => !(b.graphEventId && ownEventIds.has(b.graphEventId)));
 }
 
 syncRouter.get("/preview", async (_req, res) => {
@@ -59,6 +92,7 @@ syncRouter.get("/preview", async (_req, res) => {
         blocks: [],
         unscheduled: [],
         existing: [],
+        moves: [],
       });
       return;
     }
@@ -66,41 +100,50 @@ syncRouter.get("/preview", async (_req, res) => {
     const existing = db
       .prepare("SELECT * FROM events WHERE status = 'scheduled' AND end_utc > datetime('now')")
       .all() as EventRow[];
-    const reservedKeys = new Set(existing.map((e) => e.jira_key));
+    const ownEventIds = new Set(existing.map((e) => e.graph_event_id));
+    const replannableBusy = filterOutOwnEvents(busy, ownEventIds);
 
-    const ticketsForScheduling = tickets
-      .filter((t) => !reservedKeys.has(t.key))
-      .map((t) => ({
-        key: t.key,
-        projectKey: t.projectKey,
-        summary: t.summary,
-        estimateSeconds: t.estimateSeconds,
-      }));
+    const ticketsForScheduling = buildSchedulingInput(tickets, existing, settings);
+    const ticketKeys = new Set(tickets.map((t) => t.key));
 
     const result = planSchedule({
       tickets: ticketsForScheduling,
-      busy,
+      busy: replannableBusy,
       settings,
     });
+
+    const startByKey = new Map<string, string>();
+    for (const e of existing) startByKey.set(e.jira_key, e.start_utc);
+    const moves: { jiraKey: string; fromIso: string; toIso: string }[] = [];
+    for (const block of result.blocks) {
+      const prev = startByKey.get(block.jiraKey);
+      if (prev && prev !== block.startUtcIso) {
+        moves.push({ jiraKey: block.jiraKey, fromIso: prev, toIso: block.startUtcIso });
+      }
+    }
 
     res.json({
       reason: null,
       tickets: tickets.map((t) => ({
         ...t,
-        alreadyScheduled: reservedKeys.has(t.key),
+        priorityRank: priorityRank(t.priority, settings.priorityRanks),
+        alreadyScheduled: ownEventIds.size > 0 && existing.some((e) => e.jira_key === t.key),
       })),
       blocks: result.blocks,
       unscheduled: result.unscheduled,
-      existing: existing.map((e) => ({
-        jiraKey: e.jira_key,
-        projectKey: e.project_key,
-        summary: e.summary,
-        startUtcIso: e.start_utc,
-        endUtcIso: e.end_utc,
-        showAs: e.show_as,
-        status: e.status,
-        graphEventId: e.graph_event_id,
-      })),
+      existing: existing
+        .filter((e) => ticketKeys.has(e.jira_key))
+        .map((e) => ({
+          jiraKey: e.jira_key,
+          projectKey: e.project_key,
+          summary: e.summary,
+          startUtcIso: e.start_utc,
+          endUtcIso: e.end_utc,
+          showAs: e.show_as,
+          status: e.status,
+          graphEventId: e.graph_event_id,
+        })),
+      moves,
       windowStartIso: result.windowStartIso,
       windowEndIso: result.windowEndIso,
       settings,
@@ -120,6 +163,8 @@ const ConfirmSchema = z.object({
       endUtcIso: z.string(),
       durationMin: z.number(),
       showAs: z.enum(["free", "busy"]),
+      existingGraphEventId: z.string().nullable().optional(),
+      existingShowAs: z.enum(["free", "busy"]).nullable().optional(),
     }),
   ),
 });
@@ -132,12 +177,45 @@ syncRouter.post("/confirm", async (req, res) => {
     }
     const { blocks } = ConfirmSchema.parse(req.body);
 
-    const created: { jiraKey: string; graphEventId: string; webLink: string | null }[] = [];
+    const created: { jiraKey: string; graphEventId: string; webLink: string | null; action: "created" | "patched" | "noop" }[] = [];
 
-    for (const b of blocks as ProposedBlock[]) {
+    for (const b of blocks) {
       const url = `${(process.env.JIRA_BASE_URL || "").replace(/\/+$/, "")}/browse/${b.jiraKey}`;
       const subject = `[${b.jiraKey}] ${b.summary}`;
       const bodyHtml = buildBody({ key: b.jiraKey, url, estimateSeconds: b.durationMin * 60 });
+
+      if (b.existingGraphEventId) {
+        const existingRow = db
+          .prepare("SELECT * FROM events WHERE graph_event_id = ?")
+          .get(b.existingGraphEventId) as EventRow | undefined;
+        const sameTime =
+          existingRow?.start_utc === b.startUtcIso && existingRow?.end_utc === b.endUtcIso;
+        const sameShowAs = existingRow?.show_as === b.showAs;
+        if (existingRow && sameTime && sameShowAs) {
+          created.push({ jiraKey: b.jiraKey, graphEventId: b.existingGraphEventId, webLink: null, action: "noop" });
+          continue;
+        }
+        await patchEvent(b.existingGraphEventId, {
+          startUtcIso: b.startUtcIso,
+          endUtcIso: b.endUtcIso,
+          showAs: b.showAs,
+          subject,
+          bodyHtml,
+        });
+        db.prepare(
+          `UPDATE events SET project_key = @project_key, summary = @summary, start_utc = @start_utc, end_utc = @end_utc, show_as = @show_as, status = 'scheduled', updated_at = datetime('now') WHERE graph_event_id = @graph_event_id`,
+        ).run({
+          project_key: b.projectKey,
+          summary: b.summary,
+          start_utc: b.startUtcIso,
+          end_utc: b.endUtcIso,
+          show_as: b.showAs,
+          graph_event_id: b.existingGraphEventId,
+        });
+        created.push({ jiraKey: b.jiraKey, graphEventId: b.existingGraphEventId, webLink: null, action: "patched" });
+        continue;
+      }
+
       const ev = await createEvent({
         jiraKey: b.jiraKey,
         subject,
@@ -167,7 +245,7 @@ syncRouter.post("/confirm", async (req, res) => {
         end_utc: b.endUtcIso,
         show_as: b.showAs,
       });
-      created.push({ jiraKey: b.jiraKey, graphEventId: ev.id, webLink: ev.webLink });
+      created.push({ jiraKey: b.jiraKey, graphEventId: ev.id, webLink: ev.webLink, action: "created" });
     }
 
     res.json({ ok: true, created });
@@ -186,92 +264,305 @@ export async function runRescheduleSweep(): Promise<{
   const rescheduled: { jiraKey: string; from: string; to: string }[] = [];
   const completed: string[] = [];
 
+  if (settings.selectedProjectKeys.length === 0) {
+    return { rescheduled, completed, errors };
+  }
+
+  let openTickets: JiraTicket[] = [];
+  try {
+    const jql = buildJql({
+      status: settings.ticketStatus,
+      projectKeys: settings.selectedProjectKeys,
+    });
+    openTickets = await searchTickets(jql);
+  } catch (err: any) {
+    return { rescheduled, completed, errors: [{ jiraKey: "*", error: err.message }] };
+  }
+  const openByKey = new Map<string, JiraTicket>();
+  for (const t of openTickets) openByKey.set(t.key, t);
+
   const past = db
     .prepare("SELECT * FROM events WHERE status = 'scheduled' AND end_utc < datetime('now')")
     .all() as EventRow[];
 
-  if (past.length === 0) return { rescheduled, completed, errors };
+  const dropFromPlan = new Set<string>();
+  for (const row of past) {
+    try {
+      const live = openByKey.get(row.jira_key) ?? (await getTicket(row.jira_key));
+      if (!live) {
+        db.prepare(
+          "UPDATE events SET status = 'stale', updated_at = datetime('now') WHERE jira_key = ?",
+        ).run(row.jira_key);
+        dropFromPlan.add(row.jira_key);
+        continue;
+      }
+      if (settings.completedStatuses.includes(live.status)) {
+        db.prepare(
+          "UPDATE events SET status = 'completed', last_jira_status = ?, updated_at = datetime('now') WHERE jira_key = ?",
+        ).run(live.status, row.jira_key);
+        completed.push(row.jira_key);
+        dropFromPlan.add(row.jira_key);
+        continue;
+      }
+    } catch (err: any) {
+      errors.push({ jiraKey: row.jira_key, error: err.message });
+      dropFromPlan.add(row.jira_key);
+    }
+  }
+
+  const ticketsToPlan = openTickets.filter((t) => !dropFromPlan.has(t.key));
+  if (ticketsToPlan.length === 0) {
+    return { rescheduled, completed, errors };
+  }
 
   const startUtc = DateTime.utc().toISO()!;
   const endUtc = DateTime.utc()
     .plus({ days: settings.lookaheadBusinessDays + 7 })
     .toISO()!;
-  let busy: { startUtc: string; endUtc: string }[] = [];
+  let busy: BusyInterval[] = [];
   try {
     busy = await listBusyIntervals(startUtc, endUtc);
   } catch (err: any) {
-    return { rescheduled, completed, errors: [{ jiraKey: "*", error: err.message }] };
+    return { rescheduled, completed, errors: [...errors, { jiraKey: "*", error: err.message }] };
   }
 
   const futureRows = db
     .prepare("SELECT * FROM events WHERE status = 'scheduled' AND end_utc >= datetime('now')")
     .all() as EventRow[];
-  const futureBusy = futureRows.map((r) => ({ startUtc: r.start_utc, endUtc: r.end_utc }));
-  const allBusy = [...busy, ...futureBusy];
+  const ownEventIds = new Set(futureRows.map((e) => e.graph_event_id));
+  const replannableBusy = filterOutOwnEvents(busy, ownEventIds);
 
-  for (const row of past) {
+  const ticketsForScheduling = buildSchedulingInput(ticketsToPlan, futureRows, settings);
+  const result = planSchedule({
+    tickets: ticketsForScheduling,
+    busy: replannableBusy,
+    settings,
+  });
+
+  const previousByKey = new Map<string, EventRow>();
+  for (const r of futureRows) previousByKey.set(r.jira_key, r);
+  for (const r of past) if (!previousByKey.has(r.jira_key)) previousByKey.set(r.jira_key, r);
+
+  for (const block of result.blocks) {
     try {
-      const ticket = await getTicket(row.jira_key);
-      if (!ticket) {
-        db.prepare(
-          "UPDATE events SET status = 'stale', updated_at = datetime('now') WHERE jira_key = ?",
-        ).run(row.jira_key);
-        continue;
-      }
-      if (settings.completedStatuses.includes(ticket.status)) {
-        db.prepare(
-          "UPDATE events SET status = 'completed', last_jira_status = ?, updated_at = datetime('now') WHERE jira_key = ?",
-        ).run(ticket.status, row.jira_key);
-        completed.push(row.jira_key);
-        continue;
-      }
+      const prev = previousByKey.get(block.jiraKey);
+      const url = `${(process.env.JIRA_BASE_URL || "").replace(/\/+$/, "")}/browse/${block.jiraKey}`;
+      const subject = `[${block.jiraKey}] ${block.summary}`;
+      const live = openByKey.get(block.jiraKey);
+      const baseBody = buildBody({
+        key: block.jiraKey,
+        url,
+        estimateSeconds: live?.estimateSeconds ?? block.durationMin * 60,
+      });
 
-      const result = planSchedule({
-        tickets: [
-          {
-            key: ticket.key,
-            projectKey: ticket.projectKey,
-            summary: ticket.summary,
-            estimateSeconds: ticket.estimateSeconds,
-          },
-        ],
-        busy: allBusy,
-        settings,
-      });
-      const next = result.blocks[0];
-      if (!next) {
-        errors.push({ jiraKey: row.jira_key, error: "no_free_slot_in_window" });
-        continue;
+      if (block.existingGraphEventId && prev) {
+        const sameTime = prev.start_utc === block.startUtcIso && prev.end_utc === block.endUtcIso;
+        const sameShowAs = prev.show_as === block.showAs;
+        if (sameTime && sameShowAs) continue;
+        const oldRange = `${prev.start_utc} → ${prev.end_utc}`;
+        const noteHtml = `<p><strong>Rescheduled</strong> from ${escapeHtml(oldRange)} on ${new Date().toISOString()}${live ? ` — ticket still <em>${escapeHtml(live.status)}</em>.` : "."}</p>`;
+        await patchEvent(block.existingGraphEventId, {
+          startUtcIso: block.startUtcIso,
+          endUtcIso: block.endUtcIso,
+          subject,
+          bodyHtml: noteHtml + baseBody,
+          showAs: block.showAs,
+        });
+        db.prepare(
+          `UPDATE events SET start_utc = @start, end_utc = @end, last_jira_status = @status, summary = @summary, project_key = @project, show_as = @show_as, status = 'scheduled', updated_at = datetime('now') WHERE jira_key = @key`,
+        ).run({
+          start: block.startUtcIso,
+          end: block.endUtcIso,
+          status: live?.status ?? null,
+          summary: block.summary,
+          project: block.projectKey,
+          show_as: block.showAs,
+          key: block.jiraKey,
+        });
+        rescheduled.push({
+          jiraKey: block.jiraKey,
+          from: oldRange,
+          to: `${block.startUtcIso} → ${block.endUtcIso}`,
+        });
+      } else {
+        const created = await createEvent({
+          jiraKey: block.jiraKey,
+          subject,
+          bodyHtml: baseBody,
+          startUtcIso: block.startUtcIso,
+          endUtcIso: block.endUtcIso,
+          showAs: block.showAs,
+        });
+        db.prepare(
+          `INSERT INTO events (jira_key, project_key, summary, graph_event_id, start_utc, end_utc, show_as, status, updated_at)
+           VALUES (@jira_key, @project_key, @summary, @graph_event_id, @start_utc, @end_utc, @show_as, 'scheduled', datetime('now'))
+           ON CONFLICT(jira_key) DO UPDATE SET
+             project_key = excluded.project_key,
+             summary = excluded.summary,
+             graph_event_id = excluded.graph_event_id,
+             start_utc = excluded.start_utc,
+             end_utc = excluded.end_utc,
+             show_as = excluded.show_as,
+             status = 'scheduled',
+             updated_at = datetime('now')`,
+        ).run({
+          jira_key: block.jiraKey,
+          project_key: block.projectKey,
+          summary: block.summary,
+          graph_event_id: created.id,
+          start_utc: block.startUtcIso,
+          end_utc: block.endUtcIso,
+          show_as: block.showAs,
+        });
+        rescheduled.push({
+          jiraKey: block.jiraKey,
+          from: prev ? `${prev.start_utc} → ${prev.end_utc}` : "(none)",
+          to: `${block.startUtcIso} → ${block.endUtcIso}`,
+        });
       }
-      const oldRange = `${row.start_utc} → ${row.end_utc}`;
-      const noteHtml = `<p><strong>Rescheduled</strong> from ${escapeHtml(oldRange)} on ${new Date().toISOString()} — ticket still <em>${escapeHtml(ticket.status)}</em>.</p>`;
-      const url = `${(process.env.JIRA_BASE_URL || "").replace(/\/+$/, "")}/browse/${ticket.key}`;
-      const bodyHtml = noteHtml + buildBody({ key: ticket.key, url, estimateSeconds: ticket.estimateSeconds });
-      await patchEvent(row.graph_event_id, {
-        startUtcIso: next.startUtcIso,
-        endUtcIso: next.endUtcIso,
-        bodyHtml,
-        subject: `[${ticket.key}] ${ticket.summary}`,
-        showAs: row.show_as,
-      });
-      db.prepare(
-        `UPDATE events SET start_utc = @start, end_utc = @end, last_jira_status = @status, summary = @summary, updated_at = datetime('now') WHERE jira_key = @key`,
-      ).run({
-        start: next.startUtcIso,
-        end: next.endUtcIso,
-        status: ticket.status,
-        summary: ticket.summary,
-        key: row.jira_key,
-      });
-      allBusy.push({ startUtc: next.startUtcIso, endUtc: next.endUtcIso });
-      rescheduled.push({ jiraKey: row.jira_key, from: oldRange, to: `${next.startUtcIso} → ${next.endUtcIso}` });
     } catch (err: any) {
-      errors.push({ jiraKey: row.jira_key, error: err.message });
+      errors.push({ jiraKey: block.jiraKey, error: err.message });
     }
+  }
+
+  for (const u of result.unscheduled) {
+    errors.push({ jiraKey: u.jiraKey, error: u.reason });
   }
 
   return { rescheduled, completed, errors };
 }
+
+const ScheduleOneSchema = z.object({
+  jiraKey: z.string().min(1),
+  lookaheadBusinessDays: z.number().int().min(1).max(120).optional(),
+});
+
+const FORCE_SCHEDULE_DEFAULT_LOOKAHEAD = 60;
+
+syncRouter.post("/schedule-one", async (req, res) => {
+  try {
+    if (!isSignedIn()) {
+      res.status(401).json({ error: "Not signed in to Microsoft" });
+      return;
+    }
+    const { jiraKey, lookaheadBusinessDays } = ScheduleOneSchema.parse(req.body);
+    const settings = readSettings();
+    const ticket = await getTicket(jiraKey);
+    if (!ticket) {
+      res.status(404).json({ error: `Jira ticket ${jiraKey} not found` });
+      return;
+    }
+
+    const extendedLookahead = Math.max(
+      settings.lookaheadBusinessDays,
+      lookaheadBusinessDays ?? FORCE_SCHEDULE_DEFAULT_LOOKAHEAD,
+    );
+    const extendedSettings: Settings = { ...settings, lookaheadBusinessDays: extendedLookahead };
+
+    const startUtc = DateTime.utc().toISO()!;
+    const endUtc = DateTime.utc()
+      .plus({ days: extendedLookahead + 14 })
+      .toISO()!;
+    const busy = await listBusyIntervals(startUtc, endUtc);
+
+    const existingRow = db
+      .prepare("SELECT * FROM events WHERE jira_key = ?")
+      .get(jiraKey) as EventRow | undefined;
+
+    const single: TicketForScheduling = {
+      key: ticket.key,
+      projectKey: ticket.projectKey,
+      summary: ticket.summary,
+      estimateSeconds: ticket.estimateSeconds,
+      priorityRank: priorityRank(ticket.priority, settings.priorityRanks),
+      createdIso: ticket.created,
+      existingGraphEventId:
+        existingRow && existingRow.status === "scheduled" ? existingRow.graph_event_id : null,
+      existingShowAs:
+        existingRow && existingRow.status === "scheduled" ? existingRow.show_as : null,
+    };
+
+    const ownEventIds = new Set<string>();
+    if (single.existingGraphEventId) ownEventIds.add(single.existingGraphEventId);
+    const replannableBusy = filterOutOwnEvents(busy, ownEventIds);
+
+    const result = planSchedule({
+      tickets: [single],
+      busy: replannableBusy,
+      settings: extendedSettings,
+    });
+    const block = result.blocks[0];
+    if (!block) {
+      res.status(409).json({
+        error: `No free slot found for ${jiraKey} in the next ${extendedLookahead} business days`,
+      });
+      return;
+    }
+
+    const url = `${(process.env.JIRA_BASE_URL || "").replace(/\/+$/, "")}/browse/${ticket.key}`;
+    const subject = `[${ticket.key}] ${ticket.summary}`;
+    const bodyHtml = buildBody({
+      key: ticket.key,
+      url,
+      estimateSeconds: ticket.estimateSeconds ?? block.durationMin * 60,
+    });
+
+    if (block.existingGraphEventId) {
+      await patchEvent(block.existingGraphEventId, {
+        startUtcIso: block.startUtcIso,
+        endUtcIso: block.endUtcIso,
+        showAs: block.showAs,
+        subject,
+        bodyHtml,
+      });
+      db.prepare(
+        `UPDATE events SET project_key = @project_key, summary = @summary, start_utc = @start_utc, end_utc = @end_utc, show_as = @show_as, status = 'scheduled', updated_at = datetime('now') WHERE graph_event_id = @graph_event_id`,
+      ).run({
+        project_key: block.projectKey,
+        summary: block.summary,
+        start_utc: block.startUtcIso,
+        end_utc: block.endUtcIso,
+        show_as: block.showAs,
+        graph_event_id: block.existingGraphEventId,
+      });
+      res.json({ ok: true, block, action: "patched" });
+      return;
+    }
+
+    const ev = await createEvent({
+      jiraKey: block.jiraKey,
+      subject,
+      bodyHtml,
+      startUtcIso: block.startUtcIso,
+      endUtcIso: block.endUtcIso,
+      showAs: block.showAs,
+    });
+    db.prepare(
+      `INSERT INTO events (jira_key, project_key, summary, graph_event_id, start_utc, end_utc, show_as, status, updated_at)
+       VALUES (@jira_key, @project_key, @summary, @graph_event_id, @start_utc, @end_utc, @show_as, 'scheduled', datetime('now'))
+       ON CONFLICT(jira_key) DO UPDATE SET
+         project_key = excluded.project_key,
+         summary = excluded.summary,
+         graph_event_id = excluded.graph_event_id,
+         start_utc = excluded.start_utc,
+         end_utc = excluded.end_utc,
+         show_as = excluded.show_as,
+         status = 'scheduled',
+         updated_at = datetime('now')`,
+    ).run({
+      jira_key: block.jiraKey,
+      project_key: block.projectKey,
+      summary: block.summary,
+      graph_event_id: ev.id,
+      start_utc: block.startUtcIso,
+      end_utc: block.endUtcIso,
+      show_as: block.showAs,
+    });
+    res.json({ ok: true, block, action: "created", webLink: ev.webLink });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 syncRouter.post("/reschedule", async (_req, res) => {
   try {
