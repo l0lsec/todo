@@ -12,6 +12,7 @@ export function App() {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [loading, setLoading] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [confirmingKeys, setConfirmingKeys] = useState<Set<string>>(new Set());
   const [rescheduling, setRescheduling] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -88,6 +89,24 @@ export function App() {
       toasts.push("error", `Confirm failed: ${err.message}`);
     } finally {
       setConfirming(false);
+    }
+  }
+
+  async function confirmOne(block: ProposedBlock) {
+    if (confirmingKeys.has(block.jiraKey)) return;
+    setConfirmingKeys((s) => new Set(s).add(block.jiraKey));
+    try {
+      await api.confirm([block]);
+      toasts.push("success", `Scheduled ${block.jiraKey}`);
+      await refreshPreview();
+    } catch (err: any) {
+      toasts.push("error", `Schedule failed: ${err.message}`);
+    } finally {
+      setConfirmingKeys((s) => {
+        const n = new Set(s);
+        n.delete(block.jiraKey);
+        return n;
+      });
     }
   }
 
@@ -228,6 +247,8 @@ export function App() {
                     onChangeStatus={setTicketStatus}
                     onError={(m) => toasts.push("error", m)}
                     onDeleteExisting={deleteScheduled}
+                    onConfirmBlock={confirmOne}
+                    confirmingKeys={confirmingKeys}
                   />
 
                   {preview.unscheduled.length > 0 && (

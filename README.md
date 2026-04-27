@@ -1,5 +1,7 @@
 # ToDo
 
+> **Project page:** <https://l0lsec.github.io/todo/>
+
 A small local app that pulls your Jira tickets in **Selected for Development** (assigned to you, in projects you choose) and auto-creates time blocks on your Outlook calendar in the open slots between your meetings. Past blocks for tickets that aren't Done get moved to the next free slot.
 
 - Default events are marked **Free** so people can still book over you. You can flip individual blocks to **Busy** before confirming.
@@ -108,6 +110,18 @@ data/                     # SQLite database lives here (gitignored)
 | `npm run dev`     | Run server on `:4000` and Vite UI on `:5173` |
 | `npm run build`   | Type-check the server and build the web bundle |
 | `npm run typecheck` | Type-check both halves without emitting    |
+
+## Project page (GitHub Pages)
+
+A static landing page for the project lives in [`docs/`](./docs) and is published to <https://l0lsec.github.io/todo/> by [`.github/workflows/pages.yml`](./.github/workflows/pages.yml).
+
+To turn it on the first time:
+
+1. Push to `main`.
+2. On GitHub: **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+3. The next push to `docs/` (or a manual run from the **Actions** tab) deploys the site.
+
+Edit `docs/index.html` to update the page — it's a single self-contained HTML file with inline CSS, no build step.
 
 ## Notes & limits
 
