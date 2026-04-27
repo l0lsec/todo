@@ -59,6 +59,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ jiraKey, lookaheadBusinessDays }),
     }),
+  scheduleAt: (
+    jiraKey: string,
+    startUtcIso: string,
+    opts?: { durationMin?: number; showAs?: "free" | "busy" },
+  ) =>
+    jfetch<{
+      ok: true;
+      block: ProposedBlock;
+      action: "created" | "patched" | "noop" | "adopted";
+      webLink?: string | null;
+    }>("/api/sync/schedule-at", {
+      method: "POST",
+      body: JSON.stringify({ jiraKey, startUtcIso, ...opts }),
+    }),
   reschedule: () =>
     jfetch<{
       rescheduled: { jiraKey: string; from: string; to: string }[];

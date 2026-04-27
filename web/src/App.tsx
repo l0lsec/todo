@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "./api";
-import type { Health, Move, Preview, ProposedBlock } from "./types";
+import type { Health, Move, Preview, ProposedBlock, Settings, Ticket } from "./types";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { SchedulePreview } from "./components/SchedulePreview";
 import { ToastTray, useToasts } from "./components/Toast";
+import {
+  ManualScheduleDialog,
+  type ManualScheduleSubmit,
+} from "./components/ManualScheduleDialog";
 
 function confirmButtonLabel(blocks: ProposedBlock[], moves: Move[]): string {
   const total = blocks.length;
@@ -28,6 +32,8 @@ export function App() {
   const [confirming, setConfirming] = useState(false);
   const [confirmingKeys, setConfirmingKeys] = useState<Set<string>>(new Set());
   const [forcingKeys, setForcingKeys] = useState<Set<string>>(new Set());
+  const [pickingKeys, setPickingKeys] = useState<Set<string>>(new Set());
+  const [pickingFor, setPickingFor] = useState<string | null>(null);
   const [rescheduling, setRescheduling] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -153,6 +159,36 @@ export function App() {
       toasts.push("error", `Schedule failed: ${err.message}`);
     } finally {
       setForcingKeys((s) => {
+        const n = new Set(s);
+        n.delete(jiraKey);
+        return n;
+      });
+    }
+  }
+
+  async function scheduleAt(jiraKey: string, payload: ManualScheduleSubmit) {
+    if (pickingKeys.has(jiraKey)) return;
+    setPickingKeys((s) => new Set(s).add(jiraKey));
+    try {
+      const res = await api.scheduleAt(jiraKey, payload.startUtcIso, {
+        durationMin: payload.durationMin,
+        showAs: payload.showAs,
+      });
+      const when = new Date(res.block.startUtcIso).toLocaleString(undefined, {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      });
+      const verb = res.action === "patched" ? "Moved" : "Scheduled";
+      toasts.push("success", `${verb} ${jiraKey} for ${when}`);
+      setPickingFor(null);
+      await refreshPreview();
+    } catch (err: any) {
+      toasts.push("error", `Schedule failed: ${err.message}`);
+    } finally {
+      setPickingKeys((s) => {
         const n = new Set(s);
         n.delete(jiraKey);
         return n;
@@ -315,6 +351,7 @@ export function App() {
                         {preview.unscheduled.map((u) => {
                           const t = preview.tickets.find((x) => x.key === u.jiraKey);
                           const isForcing = forcingKeys.has(u.jiraKey);
+                          const isPicking = pickingKeys.has(u.jiraKey);
                           return (
                             <li
                               key={u.jiraKey}
@@ -331,8 +368,16 @@ export function App() {
                               <span className="flex-1 truncate">{t?.summary ?? ""}</span>
                               <span className="text-xs text-slate-500 shrink-0">{u.reason}</span>
                               <button
+                                onClick={() => setPickingFor(u.jiraKey)}
+                                disabled={isPicking || isForcing}
+                                className="shrink-0 text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50 disabled:opacity-50"
+                                title="Pick a specific date and time for this ticket"
+                              >
+                                {isPicking ? "Scheduling…" : "Pick time…"}
+                              </button>
+                              <button
                                 onClick={() => scheduleOne(u.jiraKey)}
-                                disabled={isForcing}
+                                disabled={isForcing || isPicking}
                                 className="shrink-0 text-xs px-2 py-1 rounded bg-slate-900 text-white hover:bg-slate-700 disabled:opacity-50"
                                 title="Find the next free slot beyond the lookahead window and schedule this ticket"
                               >
@@ -357,8 +402,70 @@ export function App() {
         onSaved={refreshPreview}
         pushToast={toasts.push}
       />
+      <ManualScheduleDialogContainer
+        pickingFor={pickingFor}
+        preview={preview}
+        submitting={pickingFor ? pickingKeys.has(pickingFor) : false}
+        onSubmit={scheduleAt}
+        onClose={() => setPickingFor(null)}
+      />
       <ToastTray items={toasts.items} onDismiss={toasts.dismiss} />
     </div>
+  );
+}
+
+function computeDurationMin(
+  estimateSeconds: number | null | undefined,
+  settings?: Settings,
+): number {
+  const minSlot = settings?.minSlotMinutes ?? 30;
+  const defaultEst = settings?.defaultEstimateMinutes ?? 60;
+  const baseSec = estimateSeconds && estimateSeconds > 0
+    ? estimateSeconds
+    : defaultEst * 60;
+  const min = Math.ceil(baseSec / 60);
+  return Math.max(minSlot, Math.ceil(min / 30) * 30);
+}
+
+function ManualScheduleDialogContainer({
+  pickingFor,
+  preview,
+  submitting,
+  onSubmit,
+  onClose,
+}: {
+  pickingFor: string | null;
+  preview: Preview | null;
+  submitting: boolean;
+  onSubmit: (jiraKey: string, payload: ManualScheduleSubmit) => void;
+  onClose: () => void;
+}) {
+  const ticket: Ticket | null = useMemo(() => {
+    if (!pickingFor || !preview) return null;
+    return preview.tickets.find((t) => t.key === pickingFor) ?? null;
+  }, [pickingFor, preview]);
+
+  const durationMin = useMemo(
+    () => computeDurationMin(ticket?.estimateSeconds, preview?.settings),
+    [ticket?.estimateSeconds, preview?.settings],
+  );
+
+  return (
+    <ManualScheduleDialog
+      open={!!pickingFor && !!ticket}
+      ticket={ticket ? { key: ticket.key, summary: ticket.summary } : null}
+      durationMin={durationMin}
+      defaultShowAs={preview?.settings?.defaultShowAs ?? "free"}
+      busy={preview?.busy ?? []}
+      existing={preview?.existing ?? []}
+      settings={preview?.settings}
+      submitting={submitting}
+      onSubmit={(payload) => {
+        if (!pickingFor) return;
+        onSubmit(pickingFor, payload);
+      }}
+      onClose={onClose}
+    />
   );
 }
 
