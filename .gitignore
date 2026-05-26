@@ -6,3 +6,4 @@ data/
 .DS_Store
 *.log
 .vite/
+config/settings.json

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ExistingEvent, ProposedBlock, Ticket } from "../types";
 import { StatusPill } from "./StatusPill";
 
@@ -32,10 +32,12 @@ export function SchedulePreview({
   onChangeShowAs,
   onSetAllShowAs,
   onChangeStatus,
+  onChangeDuration,
   onError,
   onDeleteExisting,
   onConfirmBlock,
   confirmingKeys,
+  savingDurationKeys,
 }: {
   blocks: ProposedBlock[];
   existing: ExistingEvent[];
@@ -43,10 +45,12 @@ export function SchedulePreview({
   onChangeShowAs: (jiraKey: string, showAs: "free" | "busy") => void;
   onSetAllShowAs: (showAs: "free" | "busy") => void;
   onChangeStatus: (jiraKey: string, status: string) => void;
+  onChangeDuration: (jiraKey: string, minutes: number) => void;
   onError: (msg: string) => void;
   onDeleteExisting: (jiraKey: string) => void;
   onConfirmBlock: (block: ProposedBlock) => void;
   confirmingKeys: Set<string>;
+  savingDurationKeys: Set<string>;
 }) {
   const ticketByKey = useMemo(() => {
     const m = new Map<string, Ticket>();
@@ -132,10 +136,12 @@ export function SchedulePreview({
                     row={r}
                     onChangeShowAs={onChangeShowAs}
                     onChangeStatus={onChangeStatus}
+                    onChangeDuration={onChangeDuration}
                     onError={onError}
                     onConfirm={onConfirmBlock}
                     onDelete={onDeleteExisting}
                     isConfirming={confirmingKeys.has(r.block.jiraKey)}
+                    isSavingDuration={savingDurationKeys.has(r.block.jiraKey)}
                   />
                 ) : (
                   <ExistingRow
@@ -196,18 +202,22 @@ function ProposedRow({
   row,
   onChangeShowAs,
   onChangeStatus,
+  onChangeDuration,
   onError,
   onConfirm,
   onDelete,
   isConfirming,
+  isSavingDuration,
 }: {
   row: Extract<Row, { kind: "proposed" }>;
   onChangeShowAs: (key: string, showAs: "free" | "busy") => void;
   onChangeStatus: (key: string, status: string) => void;
+  onChangeDuration: (key: string, minutes: number) => void;
   onError: (msg: string) => void;
   onConfirm: (block: ProposedBlock) => void;
   onDelete: (key: string) => void;
   isConfirming: boolean;
+  isSavingDuration: boolean;
 }) {
   const { block, ticket, previousStartIso } = row;
   const start = new Date(block.startUtcIso);
@@ -246,7 +256,11 @@ function ProposedRow({
         {block.jiraKey}
       </a>
       <span className="flex-1 min-w-0 break-words text-sm">{block.summary}</span>
-      <span className="shrink-0 mt-0.5 text-xs text-slate-500">{block.durationMin}m</span>
+      <DurationInput
+        value={block.durationMin}
+        disabled={isSavingDuration}
+        onCommit={(m) => onChangeDuration(block.jiraKey, m)}
+      />
       <div className="shrink-0">
         <FreeBusyToggle
           value={block.showAs}
@@ -346,6 +360,64 @@ function ExistingRow({
         Remove
       </button>
     </li>
+  );
+}
+
+function DurationInput({
+  value,
+  disabled,
+  onCommit,
+}: {
+  value: number;
+  disabled?: boolean;
+  onCommit: (minutes: number) => void;
+}) {
+  const [draft, setDraft] = useState<string>(String(value));
+
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  function commit() {
+    const n = parseInt(draft, 10);
+    if (!Number.isFinite(n)) {
+      setDraft(String(value));
+      return;
+    }
+    const clamped = Math.min(480, Math.max(15, Math.round(n / 15) * 15));
+    if (clamped === value) {
+      setDraft(String(value));
+      return;
+    }
+    setDraft(String(clamped));
+    onCommit(clamped);
+  }
+
+  return (
+    <span className="shrink-0 mt-0.5 inline-flex items-center text-xs text-slate-500 tabular-nums">
+      <input
+        type="number"
+        min={15}
+        max={480}
+        step={15}
+        value={draft}
+        disabled={disabled}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            (e.currentTarget as HTMLInputElement).blur();
+          } else if (e.key === "Escape") {
+            setDraft(String(value));
+            (e.currentTarget as HTMLInputElement).blur();
+          }
+        }}
+        title="Duration in minutes (rounded to 15)"
+        className="w-12 text-right px-1 py-0.5 border border-slate-200 rounded bg-white focus:outline-none focus:border-slate-400 disabled:opacity-50 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+      />
+      <span className="ml-0.5">m</span>
+    </span>
   );
 }
 

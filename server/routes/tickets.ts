@@ -1,7 +1,12 @@
 import { Router } from "express";
 import { z } from "zod";
 import { db } from "../db.js";
-import { getTransitions, transitionTicket, getTicket } from "../services/jira.js";
+import {
+  getTransitions,
+  transitionTicket,
+  getTicket,
+  setOriginalEstimate,
+} from "../services/jira.js";
 import { deleteEvent } from "../services/graph.js";
 import { readSettings } from "../settings.js";
 
@@ -52,6 +57,21 @@ ticketsRouter.post("/:key/transition", async (req, res) => {
       }
     }
 
+    res.json({ ok: true, ticket });
+  } catch (err: any) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+const EstimateBody = z.object({
+  minutes: z.number().int().min(15).max(480),
+});
+
+ticketsRouter.put("/:key/estimate", async (req, res) => {
+  try {
+    const { minutes } = EstimateBody.parse(req.body);
+    await setOriginalEstimate(req.params.key, minutes);
+    const ticket = await getTicket(req.params.key);
     res.json({ ok: true, ticket });
   } catch (err: any) {
     res.status(502).json({ error: err.message });

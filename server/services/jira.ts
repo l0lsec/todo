@@ -167,14 +167,24 @@ export async function transitionTicket(key: string, transitionId: string): Promi
   });
 }
 
+export async function setOriginalEstimate(key: string, minutes: number): Promise<void> {
+  await jiraFetch(`/rest/api/3/issue/${encodeURIComponent(key)}`, {
+    method: "PUT",
+    body: JSON.stringify({
+      fields: { timetracking: { originalEstimate: `${minutes}m` } },
+    }),
+  });
+}
+
 export function buildJql(opts: {
-  status: string;
+  statuses: string[];
   projectKeys: string[];
 }): string {
-  const escaped = opts.status.replace(/"/g, '\\"');
+  const statuses = opts.statuses.length > 0 ? opts.statuses : ["Selected for Development"];
+  const escaped = statuses.map((s) => `"${s.replace(/"/g, '\\"')}"`).join(", ");
   const parts = [
     "assignee = currentUser()",
-    `status = "${escaped}"`,
+    `status in (${escaped})`,
   ];
   if (opts.projectKeys.length > 0) {
     parts.push(`project in (${opts.projectKeys.join(",")})`);

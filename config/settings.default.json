@@ -8,7 +8,7 @@
   "defaultEstimateMinutes": 60,
   "defaultShowAs": "free",
   "selectedProjectKeys": [],
-  "ticketStatus": "Selected for Development",
+  "ticketStatuses": ["Selected for Development", "In Progress"],
   "completedStatuses": ["Done", "In Review", "Closed", "Resolved"],
   "cronSchedule": "0 7 * * 1-5",
   "priorityRanks": {

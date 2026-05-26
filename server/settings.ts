@@ -32,7 +32,9 @@ export const SettingsSchema = z.object({
   defaultEstimateMinutes: z.number().int().min(15).default(60),
   defaultShowAs: z.enum(["free", "busy"]).default("free"),
   selectedProjectKeys: z.array(z.string()).default([]),
-  ticketStatus: z.string().default("Selected for Development"),
+  ticketStatuses: z
+    .array(z.string())
+    .default(["Selected for Development", "In Progress"]),
   completedStatuses: z
     .array(z.string())
     .default(["Done", "In Review", "Closed", "Resolved"]),
@@ -41,6 +43,16 @@ export const SettingsSchema = z.object({
     .record(z.string(), z.number().int().min(1).max(99))
     .default({ ...DEFAULT_PRIORITY_RANK }),
 });
+
+function migrateLegacyKeys(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const obj = raw as Record<string, unknown>;
+  if (!("ticketStatuses" in obj) && typeof obj.ticketStatus === "string") {
+    const { ticketStatus, ...rest } = obj;
+    return { ...rest, ticketStatuses: [ticketStatus] };
+  }
+  return raw;
+}
 
 export type Settings = z.infer<typeof SettingsSchema>;
 
@@ -65,7 +77,7 @@ function ensureFile(): void {
 export function readSettings(): Settings {
   ensureFile();
   const raw = JSON.parse(readFileSync(SETTINGS_PATH, "utf8"));
-  return SettingsSchema.parse(raw);
+  return SettingsSchema.parse(migrateLegacyKeys(raw));
 }
 
 export function writeSettings(patch: Partial<Settings>): Settings {

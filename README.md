@@ -2,7 +2,7 @@
 
 > **Project page:** <https://l0lsec.github.io/todo/>
 
-A small local app that pulls your Jira tickets in **Selected for Development** (assigned to you, in projects you choose) and auto-creates time blocks on your Outlook calendar in the open slots between your meetings. Past blocks for tickets that aren't Done get moved to the next free slot.
+A small local app that pulls your Jira tickets in **Selected for Development** or **In Progress** (assigned to you, in projects you choose) and auto-creates time blocks on your Outlook calendar in the open slots between your meetings. Past blocks for tickets that aren't Done get moved to the next free slot. The pickup statuses are configurable in the Settings drawer.
 
 - Default events are marked **Free** so people can still book over you. You can flip individual blocks to **Busy** before confirming.
 - Change Jira ticket status (Done, In Progress, Blocked, …) right from the dashboard. Marking a ticket Done deletes its future calendar block.
@@ -56,7 +56,7 @@ The first time you open the dashboard:
 
 ## How it schedules
 
-- Reads `assignee = currentUser() AND status = "Selected for Development" AND project in (KEY1, KEY2, …)` from Jira.
+- Reads `assignee = currentUser() AND status in ("Selected for Development", "In Progress") AND project in (KEY1, KEY2, …)` from Jira (statuses configurable).
 - Reads your busy events from Microsoft Graph for the next `lookaheadBusinessDays` (default 5).
 - Subtracts a `bufferMinutes` margin around every meeting, then greedily fits each ticket (sorted by priority then created date) into the first free slot of at least the ticket's duration.
 - Duration = Jira `Original Estimate`, rounded up to 30 minutes; falls back to `defaultEstimateMinutes` (default 60) if missing.

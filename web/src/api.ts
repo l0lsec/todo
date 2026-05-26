@@ -82,6 +82,12 @@ export const api = {
   deleteScheduled: (jiraKey: string) =>
     jfetch<{ ok: true }>(`/api/sync/event/${encodeURIComponent(jiraKey)}`, { method: "DELETE" }),
 
+  setEstimate: (jiraKey: string, minutes: number) =>
+    jfetch<{ ok: true }>(`/api/tickets/${encodeURIComponent(jiraKey)}/estimate`, {
+      method: "PUT",
+      body: JSON.stringify({ minutes }),
+    }),
+
   transitions: (jiraKey: string) =>
     jfetch<{ transitions: Transition[] }>(`/api/tickets/${encodeURIComponent(jiraKey)}/transitions`),
   transition: (jiraKey: string, transitionId: string) =>

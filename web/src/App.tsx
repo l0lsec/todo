@@ -33,6 +33,7 @@ export function App() {
   const [confirmingKeys, setConfirmingKeys] = useState<Set<string>>(new Set());
   const [forcingKeys, setForcingKeys] = useState<Set<string>>(new Set());
   const [pickingKeys, setPickingKeys] = useState<Set<string>>(new Set());
+  const [savingDurationKeys, setSavingDurationKeys] = useState<Set<string>>(new Set());
   const [pickingFor, setPickingFor] = useState<string | null>(null);
   const [rescheduling, setRescheduling] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -196,6 +197,48 @@ export function App() {
     }
   }
 
+  async function changeDuration(jiraKey: string, minutes: number) {
+    if (savingDurationKeys.has(jiraKey)) return;
+    const current = preview?.blocks.find((b) => b.jiraKey === jiraKey);
+    if (!current || current.durationMin === minutes) return;
+    const newEndIso = new Date(
+      new Date(current.startUtcIso).getTime() + minutes * 60_000,
+    ).toISOString();
+    setPreview((p) =>
+      p
+        ? {
+            ...p,
+            blocks: p.blocks.map((b) =>
+              b.jiraKey === jiraKey
+                ? { ...b, durationMin: minutes, endUtcIso: newEndIso }
+                : b,
+            ),
+          }
+        : p,
+    );
+    setSavingDurationKeys((s) => new Set(s).add(jiraKey));
+    try {
+      await api.setEstimate(jiraKey, minutes);
+      if (current.existingGraphEventId) {
+        await api.scheduleAt(jiraKey, current.startUtcIso, {
+          durationMin: minutes,
+          showAs: current.showAs,
+        });
+      }
+      toasts.push("success", `Updated duration for ${jiraKey} to ${minutes}m`);
+      await refreshPreview();
+    } catch (err: any) {
+      toasts.push("error", `Duration update failed: ${err.message}`);
+      await refreshPreview();
+    } finally {
+      setSavingDurationKeys((s) => {
+        const n = new Set(s);
+        n.delete(jiraKey);
+        return n;
+      });
+    }
+  }
+
   async function reschedule() {
     setRescheduling(true);
     try {
@@ -331,10 +374,12 @@ export function App() {
                     onChangeShowAs={setBlockShowAs}
                     onSetAllShowAs={setAllShowAs}
                     onChangeStatus={setTicketStatus}
+                    onChangeDuration={changeDuration}
                     onError={(m) => toasts.push("error", m)}
                     onDeleteExisting={deleteScheduled}
                     onConfirmBlock={confirmOne}
                     confirmingKeys={confirmingKeys}
+                    savingDurationKeys={savingDurationKeys}
                   />
 
                   {preview.unscheduled.length > 0 && (

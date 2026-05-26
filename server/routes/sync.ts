@@ -37,7 +37,7 @@ async function gatherTicketsAndBusy() {
     return { settings, tickets: [] as JiraTicket[], busy: [] as BusyInterval[], reason: "no_projects_selected" as const };
   }
   const jql = buildJql({
-    status: settings.ticketStatus,
+    statuses: settings.ticketStatuses,
     projectKeys: settings.selectedProjectKeys,
   });
   const tickets = await searchTickets(jql);
@@ -355,7 +355,7 @@ export async function runRescheduleSweep(): Promise<{
   let openTickets: JiraTicket[] = [];
   try {
     const jql = buildJql({
-      status: settings.ticketStatus,
+      statuses: settings.ticketStatuses,
       projectKeys: settings.selectedProjectKeys,
     });
     openTickets = await searchTickets(jql);

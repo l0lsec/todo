@@ -16,7 +16,7 @@ export type Settings = {
   defaultEstimateMinutes: number;
   defaultShowAs: "free" | "busy";
   selectedProjectKeys: string[];
-  ticketStatus: string;
+  ticketStatuses: string[];
   completedStatuses: string[];
   cronSchedule: string;
   priorityRanks: Record<string, number>;

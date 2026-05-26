@@ -94,7 +94,7 @@ export function SettingsDrawer({
                 </button>
               </div>
               <p className="text-xs text-slate-500 mb-2">
-                Only tickets in selected projects (assigned to you, in <em>{settings.ticketStatus}</em>) are scheduled.
+                Only tickets in selected projects (assigned to you, in <em>{settings.ticketStatuses.join(", ")}</em>) are scheduled.
               </p>
               {projects.length === 0 ? (
                 <div className="text-xs text-slate-500 border border-dashed rounded p-3">
@@ -219,11 +219,19 @@ export function SettingsDrawer({
                   <option value="busy">Busy (block others)</option>
                 </select>
               </Field>
-              <Field label="Jira ticket status">
+              <Field label="Jira ticket statuses (comma-separated)">
                 <input
                   type="text"
-                  value={settings.ticketStatus}
-                  onChange={(e) => setSettings({ ...settings, ticketStatus: e.target.value })}
+                  value={settings.ticketStatuses.join(", ")}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      ticketStatuses: e.target.value
+                        .split(",")
+                        .map((s) => s.trim())
+                        .filter(Boolean),
+                    })
+                  }
                   className="w-full border rounded px-2 py-1 text-sm"
                 />
               </Field>
