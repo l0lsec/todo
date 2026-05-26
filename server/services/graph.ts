@@ -170,6 +170,51 @@ export async function getEventById(eventId: string): Promise<GraphEventLite | nu
   };
 }
 
+export type MyJiraEvent = GraphEventLite & { jiraKey: string };
+
+export async function listMyJiraEventsInWindow(
+  startIso: string,
+  endIso: string,
+): Promise<MyJiraEvent[]> {
+  const out: MyJiraEvent[] = [];
+  const expand = `singleValueExtendedProperties($filter=id eq '${JIRA_KEY_PROP_ID}')`;
+  let url:
+    | string
+    | undefined =
+    `/me/calendarView?startDateTime=${encodeURIComponent(startIso)}` +
+    `&endDateTime=${encodeURIComponent(endIso)}` +
+    `&$select=id,start,end,showAs,webLink,isCancelled` +
+    `&$expand=${encodeURIComponent(expand)}` +
+    `&$top=200`;
+  while (url) {
+    const page: any = await gfetch(url);
+    for (const ev of page.value ?? []) {
+      if (ev.isCancelled) continue;
+      const props = (ev.singleValueExtendedProperties ?? []) as {
+        id: string;
+        value: string;
+      }[];
+      const jiraProp = props.find((p) => p.id === JIRA_KEY_PROP_ID);
+      if (!jiraProp?.value) continue;
+      const startUtcIso = toUtcIso(ev.start?.dateTime);
+      const endUtcIso = toUtcIso(ev.end?.dateTime);
+      if (!startUtcIso || !endUtcIso) continue;
+      out.push({
+        id: ev.id,
+        startUtcIso,
+        endUtcIso,
+        showAs: normalizeShowAs(ev.showAs),
+        webLink: ev.webLink ?? null,
+        isCancelled: false,
+        jiraKey: jiraProp.value,
+      });
+    }
+    const next = page["@odata.nextLink"] as string | undefined;
+    url = next ? next.replace(GRAPH, "") : undefined;
+  }
+  return out;
+}
+
 export async function findEventByJiraKey(jiraKey: string): Promise<GraphEventLite | null> {
   const escaped = jiraKey.replace(/'/g, "''");
   const filter =

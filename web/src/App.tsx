@@ -378,6 +378,7 @@ export function App() {
                     onError={(m) => toasts.push("error", m)}
                     onDeleteExisting={deleteScheduled}
                     onConfirmBlock={confirmOne}
+                    onPickTime={(key) => setPickingFor(key)}
                     confirmingKeys={confirmingKeys}
                     savingDurationKeys={savingDurationKeys}
                   />
@@ -490,17 +491,34 @@ function ManualScheduleDialogContainer({
     return preview.tickets.find((t) => t.key === pickingFor) ?? null;
   }, [pickingFor, preview]);
 
+  const initialStartUtcIso = useMemo(() => {
+    if (!pickingFor || !preview) return undefined;
+    const block = preview.blocks.find((b) => b.jiraKey === pickingFor);
+    if (block) return block.startUtcIso;
+    const ev = preview.existing.find((e) => e.jiraKey === pickingFor);
+    return ev?.startUtcIso;
+  }, [pickingFor, preview]);
+
   const durationMin = useMemo(
     () => computeDurationMin(ticket?.estimateSeconds, preview?.settings),
     [ticket?.estimateSeconds, preview?.settings],
   );
+
+  const defaultShowAs = useMemo<"free" | "busy">(() => {
+    if (!pickingFor || !preview) return preview?.settings?.defaultShowAs ?? "free";
+    const block = preview.blocks.find((b) => b.jiraKey === pickingFor);
+    if (block) return block.showAs;
+    const ev = preview.existing.find((e) => e.jiraKey === pickingFor);
+    return ev?.showAs ?? preview.settings?.defaultShowAs ?? "free";
+  }, [pickingFor, preview]);
 
   return (
     <ManualScheduleDialog
       open={!!pickingFor && !!ticket}
       ticket={ticket ? { key: ticket.key, summary: ticket.summary } : null}
       durationMin={durationMin}
-      defaultShowAs={preview?.settings?.defaultShowAs ?? "free"}
+      defaultShowAs={defaultShowAs}
+      initialStartUtcIso={initialStartUtcIso}
       busy={preview?.busy ?? []}
       existing={preview?.existing ?? []}
       settings={preview?.settings}

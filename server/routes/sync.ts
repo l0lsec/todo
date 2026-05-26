@@ -6,6 +6,8 @@ import { db, type EventRow } from "../db.js";
 import { searchTickets, buildJql, getTicket, type JiraTicket } from "../services/jira.js";
 import {
   listBusyIntervals,
+  listMyJiraEventsInWindow,
+  getEventById,
   createEvent,
   patchEvent,
   deleteEvent,
@@ -34,7 +36,14 @@ function buildBody(ticket: { key: string; url: string; estimateSeconds: number |
 async function gatherTicketsAndBusy() {
   const settings = readSettings();
   if (settings.selectedProjectKeys.length === 0) {
-    return { settings, tickets: [] as JiraTicket[], busy: [] as BusyInterval[], reason: "no_projects_selected" as const };
+    return {
+      settings,
+      tickets: [] as JiraTicket[],
+      busy: [] as BusyInterval[],
+      windowStartIso: DateTime.utc().toISO()!,
+      windowEndIso: DateTime.utc().toISO()!,
+      reason: "no_projects_selected" as const,
+    };
   }
   const jql = buildJql({
     statuses: settings.ticketStatuses,
@@ -42,13 +51,104 @@ async function gatherTicketsAndBusy() {
   });
   const tickets = await searchTickets(jql);
 
-  const startUtc = DateTime.utc().toISO()!;
-  const endUtc = DateTime.utc()
+  const windowStartIso = DateTime.utc().minus({ days: 1 }).toISO()!;
+  const windowEndIso = DateTime.utc()
     .plus({ days: settings.lookaheadBusinessDays + 7 })
     .toISO()!;
-  const busy = await listBusyIntervals(startUtc, endUtc);
+  const busy = await listBusyIntervals(windowStartIso, windowEndIso);
 
-  return { settings, tickets, busy, reason: null };
+  return { settings, tickets, busy, windowStartIso, windowEndIso, reason: null };
+}
+
+async function reconcileTrackedEventsWithCalendar(
+  windowStartIso: string,
+  windowEndIso: string,
+): Promise<void> {
+  let liveEvents: Awaited<ReturnType<typeof listMyJiraEventsInWindow>>;
+  try {
+    liveEvents = await listMyJiraEventsInWindow(windowStartIso, windowEndIso);
+  } catch {
+    return;
+  }
+
+  const liveByKey = new Map<string, (typeof liveEvents)[number]>();
+  const liveById = new Set<string>();
+  for (const ev of liveEvents) {
+    liveByKey.set(ev.jiraKey, ev);
+    liveById.add(ev.id);
+  }
+
+  const tracked = db
+    .prepare("SELECT * FROM events WHERE status != 'completed'")
+    .all() as EventRow[];
+
+  for (const row of tracked) {
+    const live = liveByKey.get(row.jira_key);
+    if (live) {
+      const changed =
+        live.id !== row.graph_event_id ||
+        live.startUtcIso !== row.start_utc ||
+        live.endUtcIso !== row.end_utc ||
+        live.showAs !== row.show_as;
+      if (changed) {
+        db.prepare(
+          `UPDATE events
+           SET graph_event_id = @graph_event_id,
+               start_utc = @start_utc,
+               end_utc = @end_utc,
+               show_as = @show_as,
+               status = 'scheduled',
+               updated_at = datetime('now')
+           WHERE jira_key = @jira_key`,
+        ).run({
+          graph_event_id: live.id,
+          start_utc: live.startUtcIso,
+          end_utc: live.endUtcIso,
+          show_as: live.showAs,
+          jira_key: row.jira_key,
+        });
+      }
+      continue;
+    }
+
+    const overlapsWindow =
+      row.end_utc >= windowStartIso && row.start_utc <= windowEndIso;
+    if (!overlapsWindow) continue;
+
+    let stillExists = false;
+    try {
+      const fetched = await getEventById(row.graph_event_id);
+      if (fetched && !fetched.isCancelled) {
+        stillExists = true;
+        const changed =
+          fetched.startUtcIso !== row.start_utc ||
+          fetched.endUtcIso !== row.end_utc ||
+          fetched.showAs !== row.show_as;
+        if (changed) {
+          db.prepare(
+            `UPDATE events
+             SET start_utc = @start_utc,
+                 end_utc = @end_utc,
+                 show_as = @show_as,
+                 status = 'scheduled',
+                 updated_at = datetime('now')
+             WHERE jira_key = @jira_key`,
+          ).run({
+            start_utc: fetched.startUtcIso,
+            end_utc: fetched.endUtcIso,
+            show_as: fetched.showAs,
+            jira_key: row.jira_key,
+          });
+        }
+      }
+    } catch {
+      stillExists = true;
+    }
+
+    if (!stillExists) {
+      db.prepare("DELETE FROM events WHERE jira_key = ?").run(row.jira_key);
+    }
+  }
 }
 
 function buildSchedulingInput(
@@ -84,7 +184,8 @@ syncRouter.get("/preview", async (_req, res) => {
       res.status(401).json({ error: "Not signed in to Microsoft" });
       return;
     }
-    const { settings, tickets, busy, reason } = await gatherTicketsAndBusy();
+    const { settings, tickets, busy, windowStartIso, windowEndIso, reason } =
+      await gatherTicketsAndBusy();
     if (reason === "no_projects_selected") {
       res.json({
         reason,
@@ -98,6 +199,8 @@ syncRouter.get("/preview", async (_req, res) => {
       });
       return;
     }
+
+    await reconcileTrackedEventsWithCalendar(windowStartIso, windowEndIso);
 
     const existing = db
       .prepare("SELECT * FROM events WHERE status != 'completed' AND end_utc > datetime('now')")

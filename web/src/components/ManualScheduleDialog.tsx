@@ -18,6 +18,7 @@ export function ManualScheduleDialog({
   ticket,
   durationMin,
   defaultShowAs,
+  initialStartUtcIso,
   busy,
   existing,
   settings,
@@ -29,6 +30,7 @@ export function ManualScheduleDialog({
   ticket: { key: string; summary: string } | null;
   durationMin: number;
   defaultShowAs: "free" | "busy";
+  initialStartUtcIso?: string;
   busy: BusyInterval[];
   existing: ExistingEvent[];
   settings?: Settings;
@@ -89,6 +91,39 @@ export function ManualScheduleDialog({
 
   useEffect(() => {
     if (!open || !settings || !ticket) return;
+    if (initialStartUtcIso) {
+      const ms = Date.parse(initialStartUtcIso);
+      if (Number.isFinite(ms)) {
+        const monthInfo = getMonthInTz(ms, tz);
+        const key = getDayKeyInTz(ms, tz);
+        const [yy, mm, dd] = key.split("-").map((s) => parseInt(s, 10));
+        const slots = computeSlotsForDay({
+          year: yy!,
+          month: mm!,
+          day: dd!,
+          settings,
+          durationMin,
+          busy,
+          existing,
+          currentTicketKey: ticket.key,
+          nowMs,
+          lookaheadCapMs,
+          tz,
+        });
+        if (slots.includes(ms)) {
+          setViewMonth(monthInfo);
+          setSelectedDayKey(key);
+          setSelectedSlotMs(ms);
+          return;
+        }
+        if (slots.length > 0) {
+          setViewMonth(monthInfo);
+          setSelectedDayKey(key);
+          setSelectedSlotMs(null);
+          return;
+        }
+      }
+    }
     const first = findFirstAvailableDay({
       settings,
       durationMin,
@@ -105,7 +140,7 @@ export function ManualScheduleDialog({
     } else {
       setSelectedDayKey(null);
     }
-  }, [open, ticket?.key, settings, durationMin]);
+  }, [open, ticket?.key, settings, durationMin, initialStartUtcIso]);
 
   const slotsForSelected = selectedDayKey ? slotsByDay.get(selectedDayKey) ?? [] : [];
 

@@ -36,6 +36,7 @@ export function SchedulePreview({
   onError,
   onDeleteExisting,
   onConfirmBlock,
+  onPickTime,
   confirmingKeys,
   savingDurationKeys,
 }: {
@@ -49,6 +50,7 @@ export function SchedulePreview({
   onError: (msg: string) => void;
   onDeleteExisting: (jiraKey: string) => void;
   onConfirmBlock: (block: ProposedBlock) => void;
+  onPickTime: (jiraKey: string) => void;
   confirmingKeys: Set<string>;
   savingDurationKeys: Set<string>;
 }) {
@@ -140,6 +142,7 @@ export function SchedulePreview({
                     onError={onError}
                     onConfirm={onConfirmBlock}
                     onDelete={onDeleteExisting}
+                    onPickTime={onPickTime}
                     isConfirming={confirmingKeys.has(r.block.jiraKey)}
                     isSavingDuration={savingDurationKeys.has(r.block.jiraKey)}
                   />
@@ -150,6 +153,7 @@ export function SchedulePreview({
                     onChangeStatus={onChangeStatus}
                     onError={onError}
                     onDelete={onDeleteExisting}
+                    onPickTime={onPickTime}
                   />
                 ),
               )}
@@ -206,6 +210,7 @@ function ProposedRow({
   onError,
   onConfirm,
   onDelete,
+  onPickTime,
   isConfirming,
   isSavingDuration,
 }: {
@@ -216,6 +221,7 @@ function ProposedRow({
   onError: (msg: string) => void;
   onConfirm: (block: ProposedBlock) => void;
   onDelete: (key: string) => void;
+  onPickTime: (key: string) => void;
   isConfirming: boolean;
   isSavingDuration: boolean;
 }) {
@@ -236,9 +242,14 @@ function ProposedRow({
     : undefined;
   return (
     <li className="flex items-start gap-3 py-1.5">
-      <div className="w-32 shrink-0 text-xs font-mono text-slate-500 pt-0.5">
+      <button
+        type="button"
+        onClick={() => onPickTime(block.jiraKey)}
+        title="Click to pick a different time"
+        className="w-32 shrink-0 text-left text-xs font-mono text-slate-500 pt-0.5 hover:text-sky-700 hover:underline cursor-pointer"
+      >
         {timeFmt.format(start)} – {timeFmt.format(end)}
-      </div>
+      </button>
       <span
         className={`shrink-0 mt-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded border ${tagClass}`}
         title={movedTitle}
@@ -307,20 +318,27 @@ function ExistingRow({
   onChangeStatus,
   onError,
   onDelete,
+  onPickTime,
 }: {
   row: Extract<Row, { kind: "existing" }>;
   onChangeStatus: (key: string, status: string) => void;
   onError: (msg: string) => void;
   onDelete: (key: string) => void;
+  onPickTime: (key: string) => void;
 }) {
   const { event, ticket } = row;
   const start = new Date(event.startUtcIso);
   const end = new Date(event.endUtcIso);
   return (
     <li className="flex items-start gap-3 py-1.5">
-      <div className="w-32 shrink-0 text-xs font-mono text-slate-500 pt-0.5">
+      <button
+        type="button"
+        onClick={() => onPickTime(event.jiraKey)}
+        title="Click to pick a different time"
+        className="w-32 shrink-0 text-left text-xs font-mono text-slate-500 pt-0.5 hover:text-sky-700 hover:underline cursor-pointer"
+      >
         {timeFmt.format(start)} – {timeFmt.format(end)}
-      </div>
+      </button>
       <span className="shrink-0 mt-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
         ON CAL
       </span>
