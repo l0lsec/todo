@@ -6,10 +6,21 @@ export type Health = {
   msConfigured: boolean;
 };
 
+export type DayHours = {
+  enabled: boolean;
+  start: string;
+  end: string;
+};
+
+export type DayOfWeekKey = "0" | "1" | "2" | "3" | "4" | "5" | "6";
+
+export type WorkingHours = Record<DayOfWeekKey, DayHours>;
+
 export type Settings = {
   timezone: string;
   workdayStart: string;
   workdayEnd: string;
+  workingHours: WorkingHours;
   bufferMinutes: number;
   minSlotMinutes: number;
   lookaheadBusinessDays: number;

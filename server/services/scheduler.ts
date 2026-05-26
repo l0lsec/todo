@@ -55,14 +55,16 @@ function durationFor(t: TicketForScheduling, settings: Settings): number {
 
 export function buildWorkingWindows(settings: Settings, fromUtc: DateTime): Interval[] {
   const tz = settings.timezone;
-  const start = parseHHMM(settings.workdayStart);
-  const end = parseHHMM(settings.workdayEnd);
   const windows: Interval[] = [];
   let day = fromUtc.setZone(tz).startOf("day");
   let added = 0;
   for (let i = 0; i < 30 && added < settings.lookaheadBusinessDays; i++) {
-    const dow = day.weekday;
-    if (dow >= 1 && dow <= 5) {
+    // Luxon weekday: 1=Mon..7=Sun. Map to 0..6 with Sun=0.
+    const dowKey = String(day.weekday % 7) as keyof typeof settings.workingHours;
+    const dh = settings.workingHours[dowKey];
+    if (dh && dh.enabled) {
+      const start = parseHHMM(dh.start);
+      const end = parseHHMM(dh.end);
       const ws = day.set({ hour: start.h, minute: start.m, second: 0, millisecond: 0 });
       const we = day.set({ hour: end.h, minute: end.m, second: 0, millisecond: 0 });
       let effectiveStart = ws;

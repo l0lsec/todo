@@ -527,7 +527,6 @@ function getWeekdayInTz(y: number, m: number, d: number, tz: string): number {
 function computeLookaheadCapMs(settings: Settings, tz: string, nowMs: number): number {
   const startKey = getDayKeyInTz(nowMs, tz);
   const [yy, mm, dd] = startKey.split("-").map((s) => parseInt(s, 10));
-  const we = parseHHMM(settings.workdayEnd);
   let cur = new Date(Date.UTC(yy!, (mm ?? 1) - 1, dd ?? 1));
   let counted = 0;
   let lastEndMs: number | null = null;
@@ -536,8 +535,10 @@ function computeLookaheadCapMs(settings: Settings, tz: string, nowMs: number): n
     const cm = cur.getUTCMonth() + 1;
     const cd = cur.getUTCDate();
     const wd = getWeekdayInTz(cy, cm, cd, tz);
-    if (wd >= 1 && wd <= 5) {
+    const dh = settings.workingHours[String(wd) as keyof typeof settings.workingHours];
+    if (dh && dh.enabled) {
       counted++;
+      const we = parseHHMM(dh.end);
       lastEndMs = zonedToUtcMs(cy, cm, cd, we.h, we.m, tz);
     }
     cur = new Date(cur.getTime() + 24 * 60 * 60 * 1000);
@@ -572,10 +573,11 @@ function computeSlotsForDay(opts: {
     tz,
   } = opts;
   const wd = getWeekdayInTz(year, month, day, tz);
-  if (wd === 0 || wd === 6) return [];
+  const dh = settings.workingHours[String(wd) as keyof typeof settings.workingHours];
+  if (!dh || !dh.enabled) return [];
 
-  const ws = parseHHMM(settings.workdayStart);
-  const we = parseHHMM(settings.workdayEnd);
+  const ws = parseHHMM(dh.start);
+  const we = parseHHMM(dh.end);
   const dayStartMs = zonedToUtcMs(year, month, day, ws.h, ws.m, tz);
   const dayEndMs = zonedToUtcMs(year, month, day, we.h, we.m, tz);
   if (dayEndMs <= dayStartMs) return [];

@@ -1,6 +1,16 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { Project, Settings } from "../types";
+import type { DayHours, DayOfWeekKey, Project, Settings } from "../types";
+
+const DAY_LABELS: { key: DayOfWeekKey; label: string }[] = [
+  { key: "1", label: "Mon" },
+  { key: "2", label: "Tue" },
+  { key: "3", label: "Wed" },
+  { key: "4", label: "Thu" },
+  { key: "5", label: "Fri" },
+  { key: "6", label: "Sat" },
+  { key: "0", label: "Sun" },
+];
 
 export function SettingsDrawer({
   open,
@@ -52,6 +62,18 @@ export function SettingsDrawer({
     if (set.has(key)) set.delete(key);
     else set.add(key);
     setSettings({ ...settings, selectedProjectKeys: [...set] });
+  }
+
+  function updateDayHours(day: DayOfWeekKey, patch: Partial<DayHours>) {
+    if (!settings) return;
+    const current = settings.workingHours[day];
+    setSettings({
+      ...settings,
+      workingHours: {
+        ...settings.workingHours,
+        [day]: { ...current, ...patch },
+      },
+    });
   }
 
   async function save() {
@@ -126,23 +148,49 @@ export function SettingsDrawer({
               )}
             </section>
 
+            <section>
+              <h3 className="text-sm font-semibold text-slate-700 mb-2">Working hours</h3>
+              <div className="border rounded divide-y">
+                {DAY_LABELS.map(({ key, label }) => {
+                  const dh = settings.workingHours[key];
+                  return (
+                    <div
+                      key={key}
+                      className="flex items-center gap-3 px-3 py-2"
+                    >
+                      <label className="flex items-center gap-2 w-20 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={dh.enabled}
+                          onChange={(e) =>
+                            updateDayHours(key, { enabled: e.target.checked })
+                          }
+                          className="h-4 w-4"
+                        />
+                        <span className="text-sm">{label}</span>
+                      </label>
+                      <input
+                        type="time"
+                        value={dh.start}
+                        disabled={!dh.enabled}
+                        onChange={(e) => updateDayHours(key, { start: e.target.value })}
+                        className="flex-1 border rounded px-2 py-1 text-sm disabled:bg-slate-100 disabled:text-slate-400"
+                      />
+                      <span className="text-xs text-slate-400">to</span>
+                      <input
+                        type="time"
+                        value={dh.end}
+                        disabled={!dh.enabled}
+                        onChange={(e) => updateDayHours(key, { end: e.target.value })}
+                        className="flex-1 border rounded px-2 py-1 text-sm disabled:bg-slate-100 disabled:text-slate-400"
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+
             <section className="grid grid-cols-2 gap-4">
-              <Field label="Working hours start">
-                <input
-                  type="time"
-                  value={settings.workdayStart}
-                  onChange={(e) => setSettings({ ...settings, workdayStart: e.target.value })}
-                  className="w-full border rounded px-2 py-1 text-sm"
-                />
-              </Field>
-              <Field label="Working hours end">
-                <input
-                  type="time"
-                  value={settings.workdayEnd}
-                  onChange={(e) => setSettings({ ...settings, workdayEnd: e.target.value })}
-                  className="w-full border rounded px-2 py-1 text-sm"
-                />
-              </Field>
               <Field label="Timezone (IANA)">
                 <input
                   type="text"
