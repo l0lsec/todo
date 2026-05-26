@@ -1,29 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import type { BusyInterval, ExistingEvent, Settings } from "../types";
 
-const dayTimeFmt = new Intl.DateTimeFormat(undefined, {
-  weekday: "short",
-  month: "short",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-});
-const timeFmt = new Intl.DateTimeFormat(undefined, {
-  hour: "numeric",
-  minute: "2-digit",
-});
-
-type ConflictItem = {
-  startUtcIso: string;
-  endUtcIso: string;
-  label: string;
-};
-
 export type ManualScheduleSubmit = {
   startUtcIso: string;
   durationMin: number;
   showAs: "free" | "busy";
 };
+
+const WEEKDAY_HEADERS = ["S", "M", "T", "W", "T", "F", "S"];
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
 
 export function ManualScheduleDialog({
   open,
@@ -48,66 +36,137 @@ export function ManualScheduleDialog({
   onSubmit: (payload: ManualScheduleSubmit) => void;
   onClose: () => void;
 }) {
-  const [localStart, setLocalStart] = useState<string>("");
+  const tz = settings?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  const [viewMonth, setViewMonth] = useState<{ year: number; month: number }>(
+    () => currentMonthInTz(tz),
+  );
+  const [selectedDayKey, setSelectedDayKey] = useState<string | null>(null);
+  const [selectedSlotMs, setSelectedSlotMs] = useState<number | null>(null);
   const [showAs, setShowAs] = useState<"free" | "busy">(defaultShowAs);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
   useEffect(() => {
     if (!open) return;
-    setLocalStart(defaultLocalDateTime());
+    setNowMs(Date.now());
     setShowAs(defaultShowAs);
+    setSelectedSlotMs(null);
   }, [open, defaultShowAs, ticket?.key]);
 
-  const startDate = useMemo(() => parseLocalDateTime(localStart), [localStart]);
-  const endDate = useMemo(
-    () => (startDate ? new Date(startDate.getTime() + durationMin * 60_000) : null),
-    [startDate, durationMin],
+  const lookaheadCapMs = useMemo(() => {
+    if (!settings) return Number.POSITIVE_INFINITY;
+    return computeLookaheadCapMs(settings, tz, nowMs);
+  }, [settings, tz, nowMs]);
+
+  const monthDays = useMemo(
+    () => buildMonthGrid(viewMonth.year, viewMonth.month),
+    [viewMonth.year, viewMonth.month],
   );
 
-  const isPast = !!startDate && startDate.getTime() < Date.now();
-  const isInvalid = !startDate;
-
-  const conflicts = useMemo<ConflictItem[]>(() => {
-    if (!startDate || !endDate || !ticket) return [];
-    const startMs = startDate.getTime();
-    const endMs = endDate.getTime();
-    const items: ConflictItem[] = [];
-    for (const e of existing) {
-      if (e.jiraKey === ticket.key) continue;
-      const s = Date.parse(e.startUtcIso);
-      const en = Date.parse(e.endUtcIso);
-      if (Number.isFinite(s) && Number.isFinite(en) && startMs < en && endMs > s) {
-        items.push({
-          startUtcIso: e.startUtcIso,
-          endUtcIso: e.endUtcIso,
-          label: `${e.jiraKey}${e.summary ? ` · ${e.summary}` : ""}`,
-        });
+  const slotsByDay = useMemo<Map<string, number[]>>(() => {
+    const map = new Map<string, number[]>();
+    if (!settings || !ticket) return map;
+    for (const cell of monthDays) {
+      const slots = computeSlotsForDay({
+        year: cell.year,
+        month: cell.month,
+        day: cell.day,
+        settings,
+        durationMin,
+        busy,
+        existing,
+        currentTicketKey: ticket.key,
+        nowMs,
+        lookaheadCapMs,
+        tz,
+      });
+      if (slots.length) {
+        map.set(dayKey(cell.year, cell.month, cell.day), slots);
       }
     }
-    for (const b of busy) {
-      const s = Date.parse(b.startUtcIso);
-      const en = Date.parse(b.endUtcIso);
-      if (Number.isFinite(s) && Number.isFinite(en) && startMs < en && endMs > s) {
-        items.push({
-          startUtcIso: b.startUtcIso,
-          endUtcIso: b.endUtcIso,
-          label: "Busy on calendar",
-        });
-      }
-    }
-    return items;
-  }, [startDate, endDate, busy, existing, ticket?.key]);
+    return map;
+  }, [monthDays, settings, ticket?.key, durationMin, busy, existing, nowMs, lookaheadCapMs, tz]);
 
-  const outsideHours = useMemo(() => {
-    if (!startDate || !endDate || !settings) return false;
-    return !withinWorkingHours(startDate, endDate, settings);
-  }, [startDate, endDate, settings]);
+  useEffect(() => {
+    if (!open || !settings || !ticket) return;
+    const first = findFirstAvailableDay({
+      settings,
+      durationMin,
+      busy,
+      existing,
+      currentTicketKey: ticket.key,
+      nowMs,
+      lookaheadCapMs,
+      tz,
+    });
+    if (first) {
+      setViewMonth({ year: first.year, month: first.month });
+      setSelectedDayKey(dayKey(first.year, first.month, first.day));
+    } else {
+      setSelectedDayKey(null);
+    }
+  }, [open, ticket?.key, settings, durationMin]);
+
+  const slotsForSelected = selectedDayKey ? slotsByDay.get(selectedDayKey) ?? [] : [];
+
+  const slotTimeFmt = useMemo(
+    () =>
+      new Intl.DateTimeFormat(undefined, {
+        timeZone: tz,
+        hour: "numeric",
+        minute: "2-digit",
+      }),
+    [tz],
+  );
+
+  const selectedDayFmt = useMemo(
+    () =>
+      new Intl.DateTimeFormat(undefined, {
+        timeZone: tz,
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+      }),
+    [tz],
+  );
+
+  const todayKey = useMemo(() => getDayKeyInTz(nowMs, tz), [nowMs, tz]);
+
+  const currentMonth = currentMonthInTz(tz);
+  const isAtCurrentMonth =
+    viewMonth.year < currentMonth.year ||
+    (viewMonth.year === currentMonth.year && viewMonth.month <= currentMonth.month);
+
+  const lastAllowedMonth = useMemo(() => {
+    if (!Number.isFinite(lookaheadCapMs)) return null;
+    return getMonthInTz(lookaheadCapMs, tz);
+  }, [lookaheadCapMs, tz]);
+  const isAtLastAllowedMonth =
+    !lastAllowedMonth ||
+    viewMonth.year > lastAllowedMonth.year ||
+    (viewMonth.year === lastAllowedMonth.year && viewMonth.month >= lastAllowedMonth.month);
 
   if (!open || !ticket) return null;
 
+  const selectedDateLabel = selectedDayKey
+    ? selectedDayFmt.format(new Date(parseDayKeyToNoonUtc(selectedDayKey)))
+    : null;
+
+  function prevMonth() {
+    setViewMonth((m) => addMonths(m, -1));
+  }
+  function nextMonth() {
+    setViewMonth((m) => addMonths(m, 1));
+  }
+  function goToday() {
+    const c = currentMonthInTz(tz);
+    setViewMonth(c);
+  }
+
   function submit() {
-    if (!startDate || isPast) return;
+    if (!selectedSlotMs) return;
     onSubmit({
-      startUtcIso: new Date(startDate).toISOString(),
+      startUtcIso: new Date(selectedSlotMs).toISOString(),
       durationMin,
       showAs,
     });
@@ -115,10 +174,10 @@ export function ManualScheduleDialog({
 
   return (
     <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-900/40 p-4">
-      <div className="w-full max-w-md rounded-lg bg-white shadow-xl border">
+      <div className="w-full max-w-lg rounded-lg bg-white shadow-xl border">
         <header className="px-4 py-3 border-b">
           <h3 className="text-sm font-semibold text-slate-700">
-            Schedule {ticket.key} at a specific time
+            Schedule {ticket.key}
           </h3>
           <p className="mt-0.5 text-xs text-slate-500 truncate">{ticket.summary}</p>
         </header>
@@ -129,63 +188,140 @@ export function ManualScheduleDialog({
             <span className="font-mono text-slate-700">{durationMin} min</span>
           </div>
 
-          <label className="block">
-            <span className="block text-xs font-medium text-slate-600 mb-1">
-              Start time
-            </span>
-            <input
-              type="datetime-local"
-              value={localStart}
-              onChange={(e) => setLocalStart(e.target.value)}
-              className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm focus:border-slate-500 focus:outline-none"
-            />
-          </label>
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <button
+                type="button"
+                onClick={prevMonth}
+                disabled={isAtCurrentMonth}
+                className="p-1 rounded text-slate-500 hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent"
+                aria-label="Previous month"
+              >
+                ‹
+              </button>
+              <div className="text-sm font-medium text-slate-700">
+                {MONTH_NAMES[viewMonth.month - 1]} {viewMonth.year}
+              </div>
+              <button
+                type="button"
+                onClick={nextMonth}
+                disabled={isAtLastAllowedMonth}
+                className="p-1 rounded text-slate-500 hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent"
+                aria-label="Next month"
+              >
+                ›
+              </button>
+            </div>
 
-          <div className="flex items-center justify-between text-xs">
-            <span className="text-slate-500">Ends at</span>
-            <span className="font-mono text-slate-700">
-              {endDate ? dayTimeFmt.format(endDate) : "—"}
-            </span>
+            <div className="grid grid-cols-7 gap-1 text-[10px] uppercase tracking-wide text-slate-400 mb-1">
+              {WEEKDAY_HEADERS.map((d, i) => (
+                <div key={i} className="text-center py-1">
+                  {d}
+                </div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-7 gap-1">
+              {monthDays.map((cell) => {
+                const key = dayKey(cell.year, cell.month, cell.day);
+                const hasSlots = slotsByDay.has(key);
+                const isSelected = key === selectedDayKey;
+                const isToday = key === todayKey;
+                const isOtherMonth = !cell.inMonth;
+                const disabled = !hasSlots;
+                return (
+                  <button
+                    key={key + (isOtherMonth ? "o" : "")}
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => {
+                      setSelectedDayKey(key);
+                      setSelectedSlotMs(null);
+                    }}
+                    className={[
+                      "h-9 rounded text-sm flex items-center justify-center",
+                      isSelected
+                        ? "bg-sky-600 text-white font-semibold"
+                        : disabled
+                          ? isOtherMonth
+                            ? "text-slate-300"
+                            : "text-slate-300"
+                          : isOtherMonth
+                            ? "text-slate-400 hover:bg-slate-100"
+                            : "text-slate-700 hover:bg-slate-100",
+                      !isSelected && isToday && hasSlots ? "ring-1 ring-sky-400" : "",
+                    ].join(" ")}
+                  >
+                    {cell.day}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-2 flex items-center justify-between text-xs">
+              <button
+                type="button"
+                onClick={goToday}
+                className="text-sky-700 hover:underline"
+              >
+                Today
+              </button>
+              <span className="text-slate-400">{tz}</span>
+            </div>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-medium text-slate-600">
+                {selectedDateLabel ?? "Available times"}
+              </span>
+              {selectedDayKey && (
+                <span className="text-xs text-slate-400">
+                  {slotsForSelected.length} slot
+                  {slotsForSelected.length === 1 ? "" : "s"}
+                </span>
+              )}
+            </div>
+
+            {!selectedDayKey ? (
+              <div className="text-xs text-slate-500 px-2 py-6 text-center border border-dashed rounded">
+                No available days in the lookahead window. Try increasing the
+                lookahead in Settings.
+              </div>
+            ) : slotsForSelected.length === 0 ? (
+              <div className="text-xs text-slate-500 px-2 py-6 text-center border border-dashed rounded">
+                No available times on this day.
+              </div>
+            ) : (
+              <div className="max-h-48 overflow-y-auto pr-1">
+                <div className="grid grid-cols-3 gap-1.5">
+                  {slotsForSelected.map((ms) => {
+                    const isSelected = selectedSlotMs === ms;
+                    return (
+                      <button
+                        key={ms}
+                        type="button"
+                        onClick={() => setSelectedSlotMs(ms)}
+                        className={[
+                          "px-2 py-1.5 rounded text-xs border",
+                          isSelected
+                            ? "bg-sky-600 text-white border-sky-600"
+                            : "border-slate-300 text-slate-700 hover:bg-slate-50",
+                        ].join(" ")}
+                      >
+                        {slotTimeFmt.format(new Date(ms))}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-slate-600">Show as</span>
             <FreeBusyToggle value={showAs} onChange={setShowAs} />
           </div>
-
-          {isInvalid && (
-            <p className="text-xs text-rose-600">Pick a valid date and time.</p>
-          )}
-          {!isInvalid && isPast && (
-            <p className="text-xs text-rose-600">Pick a time in the future.</p>
-          )}
-          {!isInvalid && !isPast && outsideHours && (
-            <p className="text-xs text-slate-500">
-              Note: this is outside your working hours
-              {settings ? ` (${settings.workdayStart}–${settings.workdayEnd} ${settings.timezone})` : ""}.
-            </p>
-          )}
-          {!isInvalid && conflicts.length > 0 && (
-            <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-              <div className="font-semibold mb-1">
-                Overlaps {conflicts.length} event{conflicts.length === 1 ? "" : "s"} on
-                your calendar — you can still schedule.
-              </div>
-              <ul className="space-y-0.5">
-                {conflicts.slice(0, 2).map((c, i) => (
-                  <li key={i} className="truncate">
-                    {timeFmt.format(new Date(c.startUtcIso))}–
-                    {timeFmt.format(new Date(c.endUtcIso))} · {c.label}
-                  </li>
-                ))}
-                {conflicts.length > 2 && (
-                  <li className="text-amber-700">
-                    + {conflicts.length - 2} more
-                  </li>
-                )}
-              </ul>
-            </div>
-          )}
         </div>
 
         <footer className="px-4 py-3 border-t flex items-center justify-end gap-2">
@@ -198,7 +334,7 @@ export function ManualScheduleDialog({
           </button>
           <button
             onClick={submit}
-            disabled={submitting || isInvalid || isPast}
+            disabled={submitting || selectedSlotMs == null}
             className="text-sm px-3 py-1.5 rounded bg-slate-900 text-white hover:bg-slate-700 disabled:opacity-50"
           >
             {submitting ? "Scheduling…" : "Schedule at this time"}
@@ -240,64 +376,268 @@ function pad(n: number): string {
   return n < 10 ? `0${n}` : `${n}`;
 }
 
-function defaultLocalDateTime(): string {
-  const ms = 30 * 60 * 1000;
-  const next = new Date(Math.ceil((Date.now() + 60_000) / ms) * ms);
-  return `${next.getFullYear()}-${pad(next.getMonth() + 1)}-${pad(next.getDate())}T${pad(next.getHours())}:${pad(next.getMinutes())}`;
+function dayKey(y: number, m: number, d: number): string {
+  return `${y}-${pad(m)}-${pad(d)}`;
 }
 
-function parseLocalDateTime(value: string): Date | null {
-  if (!value) return null;
-  const d = new Date(value);
-  return Number.isFinite(d.getTime()) ? d : null;
-}
-
-function withinWorkingHours(start: Date, end: Date, settings: Settings): boolean {
-  const tz = settings.timezone;
-  const startMin = minutesOfDayInTz(start, tz);
-  const endMin = minutesOfDayInTz(end, tz);
-  const startBound = parseHHMM(settings.workdayStart);
-  const endBound = parseHHMM(settings.workdayEnd);
-  if (!startMin || !endMin) return true;
-  const sameDay = startMin.dateKey === endMin.dateKey;
-  if (!sameDay) return false;
-  const dow = startMin.weekday;
-  if (dow === 0 || dow === 6) return false;
-  return startMin.minutes >= startBound && endMin.minutes <= endBound;
-}
-
-function parseHHMM(s: string): number {
+function parseHHMM(s: string): { h: number; m: number } {
   const [h, m] = s.split(":").map((n) => parseInt(n, 10));
-  return (h ?? 0) * 60 + (m ?? 0);
+  return { h: h ?? 9, m: m ?? 0 };
 }
 
-function minutesOfDayInTz(
-  date: Date,
-  tz: string,
-): { minutes: number; dateKey: string; weekday: number } | null {
-  try {
-    const fmt = new Intl.DateTimeFormat("en-US", {
-      timeZone: tz,
-      hour12: false,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      weekday: "short",
+function addMonths(
+  m: { year: number; month: number },
+  delta: number,
+): { year: number; month: number } {
+  const total = m.year * 12 + (m.month - 1) + delta;
+  return { year: Math.floor(total / 12), month: (total % 12) + 1 };
+}
+
+function buildMonthGrid(
+  year: number,
+  month: number,
+): { year: number; month: number; day: number; inMonth: boolean }[] {
+  // Sunday-first 6-week grid covering the given month plus surrounding padding.
+  const firstWeekday = new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
+  const startMs = Date.UTC(year, month - 1, 1 - firstWeekday);
+  const cells: { year: number; month: number; day: number; inMonth: boolean }[] = [];
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(startMs + i * 24 * 60 * 60 * 1000);
+    cells.push({
+      year: d.getUTCFullYear(),
+      month: d.getUTCMonth() + 1,
+      day: d.getUTCDate(),
+      inMonth: d.getUTCMonth() + 1 === month,
     });
-    const parts = fmt.formatToParts(date);
-    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
-    const hour = parseInt(get("hour"), 10);
-    const minute = parseInt(get("minute"), 10);
-    const dateKey = `${get("year")}-${get("month")}-${get("day")}`;
-    const wdMap: Record<string, number> = {
-      Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
-    };
-    const weekday = wdMap[get("weekday")] ?? 0;
-    if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
-    return { minutes: hour * 60 + minute, dateKey, weekday };
-  } catch {
-    return null;
   }
+  return cells;
+}
+
+function currentMonthInTz(tz: string): { year: number; month: number } {
+  return getMonthInTz(Date.now(), tz);
+}
+
+function getMonthInTz(ms: number, tz: string): { year: number; month: number } {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+  });
+  const parts = fmt.formatToParts(new Date(ms));
+  const num = (t: string) =>
+    parseInt(parts.find((p) => p.type === t)?.value ?? "0", 10);
+  return { year: num("year"), month: num("month") };
+}
+
+function getDayKeyInTz(ms: number, tz: string): string {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = fmt.formatToParts(new Date(ms));
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+function parseDayKeyToNoonUtc(key: string): number {
+  const [y, m, d] = key.split("-").map((s) => parseInt(s, 10));
+  return Date.UTC(y!, (m ?? 1) - 1, d ?? 1, 12, 0);
+}
+
+function zonedToUtcMs(
+  y: number,
+  m: number,
+  d: number,
+  h: number,
+  mi: number,
+  tz: string,
+): number {
+  const utcGuess = Date.UTC(y, m - 1, d, h, mi);
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const parts = fmt.formatToParts(new Date(utcGuess));
+  const num = (t: string) =>
+    parseInt(parts.find((p) => p.type === t)?.value ?? "0", 10);
+  let hh = num("hour");
+  if (hh === 24) hh = 0;
+  const asUtc = Date.UTC(num("year"), num("month") - 1, num("day"), hh, num("minute"), num("second"));
+  const offset = asUtc - utcGuess;
+  return utcGuess - offset;
+}
+
+function getWeekdayInTz(y: number, m: number, d: number, tz: string): number {
+  const ms = zonedToUtcMs(y, m, d, 12, 0, tz);
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    weekday: "short",
+  });
+  const w = fmt.format(new Date(ms));
+  return (
+    ({ Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 } as Record<string, number>)[
+      w
+    ] ?? 0
+  );
+}
+
+function computeLookaheadCapMs(settings: Settings, tz: string, nowMs: number): number {
+  const startKey = getDayKeyInTz(nowMs, tz);
+  const [yy, mm, dd] = startKey.split("-").map((s) => parseInt(s, 10));
+  const we = parseHHMM(settings.workdayEnd);
+  let cur = new Date(Date.UTC(yy!, (mm ?? 1) - 1, dd ?? 1));
+  let counted = 0;
+  let lastEndMs: number | null = null;
+  for (let i = 0; i < 90 && counted < settings.lookaheadBusinessDays; i++) {
+    const cy = cur.getUTCFullYear();
+    const cm = cur.getUTCMonth() + 1;
+    const cd = cur.getUTCDate();
+    const wd = getWeekdayInTz(cy, cm, cd, tz);
+    if (wd >= 1 && wd <= 5) {
+      counted++;
+      lastEndMs = zonedToUtcMs(cy, cm, cd, we.h, we.m, tz);
+    }
+    cur = new Date(cur.getTime() + 24 * 60 * 60 * 1000);
+  }
+  return lastEndMs ?? Number.POSITIVE_INFINITY;
+}
+
+function computeSlotsForDay(opts: {
+  year: number;
+  month: number;
+  day: number;
+  settings: Settings;
+  durationMin: number;
+  busy: BusyInterval[];
+  existing: ExistingEvent[];
+  currentTicketKey: string;
+  nowMs: number;
+  lookaheadCapMs: number;
+  tz: string;
+}): number[] {
+  const {
+    year,
+    month,
+    day,
+    settings,
+    durationMin,
+    busy,
+    existing,
+    currentTicketKey,
+    nowMs,
+    lookaheadCapMs,
+    tz,
+  } = opts;
+  const wd = getWeekdayInTz(year, month, day, tz);
+  if (wd === 0 || wd === 6) return [];
+
+  const ws = parseHHMM(settings.workdayStart);
+  const we = parseHHMM(settings.workdayEnd);
+  const dayStartMs = zonedToUtcMs(year, month, day, ws.h, ws.m, tz);
+  const dayEndMs = zonedToUtcMs(year, month, day, we.h, we.m, tz);
+  if (dayEndMs <= dayStartMs) return [];
+  if (dayEndMs <= nowMs) return [];
+  if (dayStartMs >= lookaheadCapMs) return [];
+
+  const stepMs = Math.max(1, settings.minSlotMinutes) * 60_000;
+  const durMs = durationMin * 60_000;
+  const effEnd = Math.min(dayEndMs, lookaheadCapMs);
+
+  let effStart = Math.max(dayStartMs, nowMs);
+  if (effStart > dayStartMs) {
+    const offset = effStart - dayStartMs;
+    effStart = dayStartMs + Math.ceil(offset / stepMs) * stepMs;
+  }
+  if (effStart + durMs > effEnd) return [];
+
+  const blocked: [number, number][] = [];
+  const bufferMs = settings.bufferMinutes * 60_000;
+  for (const b of busy) {
+    const s = Date.parse(b.startUtcIso) - bufferMs;
+    const e = Date.parse(b.endUtcIso) + bufferMs;
+    if (Number.isFinite(s) && Number.isFinite(e) && e > effStart && s < effEnd) {
+      blocked.push([Math.max(s, effStart), Math.min(e, effEnd)]);
+    }
+  }
+  for (const ev of existing) {
+    if (ev.jiraKey === currentTicketKey) continue;
+    const s = Date.parse(ev.startUtcIso);
+    const e = Date.parse(ev.endUtcIso);
+    if (Number.isFinite(s) && Number.isFinite(e) && e > effStart && s < effEnd) {
+      blocked.push([Math.max(s, effStart), Math.min(e, effEnd)]);
+    }
+  }
+  blocked.sort((a, b) => a[0] - b[0]);
+
+  const merged: [number, number][] = [];
+  for (const iv of blocked) {
+    const last = merged[merged.length - 1];
+    if (!last || iv[0] > last[1]) {
+      merged.push([iv[0], iv[1]]);
+    } else {
+      last[1] = Math.max(last[1], iv[1]);
+    }
+  }
+
+  const free: [number, number][] = [];
+  let cursor = effStart;
+  for (const [s, e] of merged) {
+    if (s > cursor) free.push([cursor, s]);
+    cursor = Math.max(cursor, e);
+  }
+  if (cursor < effEnd) free.push([cursor, effEnd]);
+
+  const slots: number[] = [];
+  for (const [s, e] of free) {
+    const offset = s - dayStartMs;
+    const snapped = dayStartMs + Math.ceil(offset / stepMs) * stepMs;
+    for (let t = snapped; t + durMs <= e; t += stepMs) {
+      if (t >= nowMs) slots.push(t);
+    }
+  }
+  return slots;
+}
+
+function findFirstAvailableDay(opts: {
+  settings: Settings;
+  durationMin: number;
+  busy: BusyInterval[];
+  existing: ExistingEvent[];
+  currentTicketKey: string;
+  nowMs: number;
+  lookaheadCapMs: number;
+  tz: string;
+}): { year: number; month: number; day: number } | null {
+  const startKey = getDayKeyInTz(opts.nowMs, opts.tz);
+  const [yy, mm, dd] = startKey.split("-").map((s) => parseInt(s, 10));
+  let cur = new Date(Date.UTC(yy!, (mm ?? 1) - 1, dd ?? 1));
+  for (let i = 0; i < 90; i++) {
+    const cy = cur.getUTCFullYear();
+    const cm = cur.getUTCMonth() + 1;
+    const cd = cur.getUTCDate();
+    const slots = computeSlotsForDay({
+      year: cy,
+      month: cm,
+      day: cd,
+      settings: opts.settings,
+      durationMin: opts.durationMin,
+      busy: opts.busy,
+      existing: opts.existing,
+      currentTicketKey: opts.currentTicketKey,
+      nowMs: opts.nowMs,
+      lookaheadCapMs: opts.lookaheadCapMs,
+      tz: opts.tz,
+    });
+    if (slots.length) return { year: cy, month: cm, day: cd };
+    cur = new Date(cur.getTime() + 24 * 60 * 60 * 1000);
+  }
+  return null;
 }
