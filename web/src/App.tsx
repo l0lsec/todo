@@ -8,6 +8,7 @@ import {
   ManualScheduleDialog,
   type ManualScheduleSubmit,
 } from "./components/ManualScheduleDialog";
+import { BulkActionBar } from "./components/BulkActionBar";
 
 function confirmButtonLabel(blocks: ProposedBlock[], moves: Move[]): string {
   const total = blocks.length;
@@ -36,7 +37,10 @@ export function App() {
   const [savingDurationKeys, setSavingDurationKeys] = useState<Set<string>>(new Set());
   const [pickingFor, setPickingFor] = useState<string | null>(null);
   const [rescheduling, setRescheduling] = useState(false);
+  const [cleaningOrphans, setCleaningOrphans] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const refreshHealth = useCallback(async () => {
     try {
@@ -253,6 +257,39 @@ export function App() {
     }
   }
 
+  async function cleanupOrphans() {
+    setCleaningOrphans(true);
+    try {
+      const { orphans } = await api.listOrphans();
+      if (orphans.length === 0) {
+        toasts.push("info", "No orphan Jira blocks found on your calendar");
+        return;
+      }
+      const sample = orphans
+        .slice(0, 5)
+        .map((o) => `${o.jiraKey} @ ${new Date(o.startUtcIso).toLocaleString()}`)
+        .join("\n");
+      const more = orphans.length > 5 ? `\n…and ${orphans.length - 5} more` : "";
+      const ok = window.confirm(
+        `Found ${orphans.length} Jira-tagged event(s) on your calendar that this app no longer tracks.\n\n${sample}${more}\n\nRemove all from Outlook?`,
+      );
+      if (!ok) return;
+      const res = await api.deleteOrphans(orphans.map((o) => o.graphEventId));
+      if (res.removed) toasts.push("success", `Removed ${res.removed} orphan block(s)`);
+      if (res.failed.length) {
+        toasts.push(
+          "error",
+          `${res.failed.length} failed: ${res.failed.map((f) => f.error).join("; ")}`,
+        );
+      }
+      await refreshPreview();
+    } catch (err: any) {
+      toasts.push("error", `Cleanup failed: ${err.message}`);
+    } finally {
+      setCleaningOrphans(false);
+    }
+  }
+
   async function deleteScheduled(jiraKey: string) {
     try {
       await api.deleteScheduled(jiraKey);
@@ -260,6 +297,269 @@ export function App() {
       await refreshPreview();
     } catch (err: any) {
       toasts.push("error", err.message);
+    }
+  }
+
+  const availableKeys = useMemo(() => {
+    if (!preview) return new Set<string>();
+    const keys = new Set<string>();
+    for (const b of preview.blocks) keys.add(b.jiraKey);
+    for (const e of preview.existing) {
+      if (e.status === "scheduled") keys.add(e.jiraKey);
+    }
+    return keys;
+  }, [preview]);
+
+  useEffect(() => {
+    setSelectedKeys((prev) => {
+      if (prev.size === 0) return prev;
+      let changed = false;
+      const next = new Set<string>();
+      for (const k of prev) {
+        if (availableKeys.has(k)) next.add(k);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [availableKeys]);
+
+  const toggleKey = useCallback((jiraKey: string, selected: boolean) => {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (selected) next.add(jiraKey);
+      else next.delete(jiraKey);
+      return next;
+    });
+  }, []);
+
+  const toggleKeys = useCallback((keys: string[], selected: boolean) => {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      for (const k of keys) {
+        if (selected) next.add(k);
+        else next.delete(k);
+      }
+      return next;
+    });
+  }, []);
+
+  const clearSelection = useCallback(() => setSelectedKeys(new Set()), []);
+
+  const selectedArr = useMemo(() => [...selectedKeys], [selectedKeys]);
+
+  const { proposedSelectedKeys, existingSelectedKeys } = useMemo(() => {
+    const proposed: string[] = [];
+    const existingOnly: string[] = [];
+    if (!preview) return { proposedSelectedKeys: proposed, existingSelectedKeys: existingOnly };
+    const proposedSet = new Set(preview.blocks.map((b) => b.jiraKey));
+    const existingSet = new Set(
+      preview.existing.filter((e) => e.status === "scheduled").map((e) => e.jiraKey),
+    );
+    for (const k of selectedArr) {
+      if (proposedSet.has(k)) proposed.push(k);
+      if (existingSet.has(k) || preview.blocks.find((b) => b.jiraKey === k && b.existingGraphEventId)) {
+        existingOnly.push(k);
+      }
+    }
+    return { proposedSelectedKeys: proposed, existingSelectedKeys: existingOnly };
+  }, [selectedArr, preview]);
+
+  async function bulkSetShowAs(showAs: "free" | "busy") {
+    if (!preview || selectedKeys.size === 0) return;
+    setBulkBusy(true);
+    try {
+      const proposedSet = new Set(preview.blocks.map((b) => b.jiraKey));
+      const existingByKey = new Map(preview.existing.map((e) => [e.jiraKey, e] as const));
+      // Update local state for any proposed rows
+      setPreview((p) =>
+        p
+          ? {
+              ...p,
+              blocks: p.blocks.map((b) =>
+                selectedKeys.has(b.jiraKey) ? { ...b, showAs } : b,
+              ),
+            }
+          : p,
+      );
+      const existingOnly = selectedArr.filter(
+        (k) => !proposedSet.has(k) && existingByKey.has(k),
+      );
+      let patched = 0;
+      const errors: string[] = [];
+      await Promise.all(
+        existingOnly.map(async (k) => {
+          const ev = existingByKey.get(k)!;
+          try {
+            const durationMin = Math.max(
+              15,
+              Math.round(
+                (new Date(ev.endUtcIso).getTime() - new Date(ev.startUtcIso).getTime()) / 60000,
+              ),
+            );
+            await api.scheduleAt(k, ev.startUtcIso, { showAs, durationMin });
+            patched += 1;
+          } catch (err: any) {
+            errors.push(`${k}: ${err.message}`);
+          }
+        }),
+      );
+      const proposedTouched = selectedArr.filter((k) => proposedSet.has(k)).length;
+      const parts = [
+        proposedTouched ? `${proposedTouched} proposed marked ${showAs}` : null,
+        patched ? `${patched} existing patched ${showAs}` : null,
+      ].filter(Boolean);
+      if (parts.length) toasts.push("success", parts.join(" · "));
+      if (errors.length) toasts.push("error", `Free/Busy errors: ${errors.join("; ")}`);
+      if (patched) await refreshPreview();
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function bulkSetStatus(statusName: string) {
+    if (!preview || selectedKeys.size === 0) return;
+    setBulkBusy(true);
+    try {
+      let moved = 0;
+      const errors: string[] = [];
+      for (const k of selectedArr) {
+        try {
+          const { transitions } = await api.transitions(k);
+          const t = transitions.find((tr) => (tr.toStatus || tr.name) === statusName);
+          if (!t) {
+            errors.push(`${k}: no transition to "${statusName}"`);
+            continue;
+          }
+          const res = await api.transition(k, t.id);
+          const newStatus = res.ticket?.status ?? statusName;
+          setPreview((p) =>
+            p
+              ? {
+                  ...p,
+                  tickets: p.tickets.map((tk) =>
+                    tk.key === k ? { ...tk, status: newStatus } : tk,
+                  ),
+                }
+              : p,
+          );
+          moved += 1;
+        } catch (err: any) {
+          errors.push(`${k}: ${err.message}`);
+        }
+      }
+      if (moved) toasts.push("success", `Moved ${moved} ticket(s) to ${statusName}`);
+      if (errors.length) toasts.push("error", `Status errors: ${errors.join("; ")}`);
+      await refreshPreview();
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function bulkSetDuration(minutes: number) {
+    if (!preview || proposedSelectedKeys.length === 0) return;
+    setBulkBusy(true);
+    try {
+      let updated = 0;
+      const errors: string[] = [];
+      for (const k of proposedSelectedKeys) {
+        const current = preview.blocks.find((b) => b.jiraKey === k);
+        if (!current || current.durationMin === minutes) continue;
+        try {
+          await api.setEstimate(k, minutes);
+          if (current.existingGraphEventId) {
+            await api.scheduleAt(k, current.startUtcIso, {
+              durationMin: minutes,
+              showAs: current.showAs,
+            });
+          }
+          updated += 1;
+        } catch (err: any) {
+          errors.push(`${k}: ${err.message}`);
+        }
+      }
+      if (updated) toasts.push("success", `Updated duration to ${minutes}m for ${updated} ticket(s)`);
+      if (errors.length) toasts.push("error", `Duration errors: ${errors.join("; ")}`);
+      await refreshPreview();
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function bulkConfirm() {
+    if (!preview || proposedSelectedKeys.length === 0) return;
+    const subset = preview.blocks.filter((b) => selectedKeys.has(b.jiraKey));
+    if (subset.length === 0) return;
+    setBulkBusy(true);
+    try {
+      const res = await api.confirm(subset as ProposedBlock[]);
+      const created = res.created.filter((c) => c.action === "created").length;
+      const patched = res.created.filter((c) => c.action === "patched").length;
+      const noop = res.created.filter((c) => c.action === "noop").length;
+      const parts = [
+        created ? `${created} created` : null,
+        patched ? `${patched} moved` : null,
+        noop ? `${noop} unchanged` : null,
+      ].filter(Boolean);
+      toasts.push("success", parts.length ? parts.join(" · ") : "No changes");
+      await refreshPreview();
+    } catch (err: any) {
+      toasts.push("error", `Bulk confirm failed: ${err.message}`);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function bulkCancel() {
+    if (existingSelectedKeys.length === 0) return;
+    const ok = window.confirm(
+      `Cancel ${existingSelectedKeys.length} scheduled block(s)? This removes them from your Outlook calendar.`,
+    );
+    if (!ok) return;
+    setBulkBusy(true);
+    try {
+      // Sequential to avoid Graph throttling; one failure shouldn't stop the rest.
+      let removed = 0;
+      const failed: string[] = [];
+      for (const k of existingSelectedKeys) {
+        try {
+          await api.deleteScheduled(k);
+          removed += 1;
+        } catch (err: any) {
+          failed.push(`${k}: ${err.message}`);
+        }
+      }
+      if (removed) toasts.push("success", `Removed ${removed} block(s)`);
+      if (failed.length) {
+        toasts.push(
+          "error",
+          `${failed.length} cancellation(s) failed: ${failed.join("; ")}`,
+        );
+      }
+      await refreshPreview();
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function bulkReschedule() {
+    if (selectedKeys.size === 0) return;
+    setBulkBusy(true);
+    try {
+      let moved = 0;
+      const errors: string[] = [];
+      for (const k of selectedArr) {
+        try {
+          await api.scheduleOne(k);
+          moved += 1;
+        } catch (err: any) {
+          errors.push(`${k}: ${err.message}`);
+        }
+      }
+      if (moved) toasts.push("success", `Rescheduled ${moved} ticket(s)`);
+      if (errors.length) toasts.push("error", `Reschedule errors: ${errors.join("; ")}`);
+      await refreshPreview();
+    } finally {
+      setBulkBusy(false);
     }
   }
 
@@ -345,6 +645,14 @@ export function App() {
               >
                 {rescheduling ? "Rescheduling…" : "Run reschedule sweep"}
               </button>
+              <button
+                onClick={cleanupOrphans}
+                disabled={cleaningOrphans}
+                className="text-sm px-3 py-1.5 rounded border border-rose-300 text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                title="Find Jira-tagged Outlook events not tracked here and remove them"
+              >
+                {cleaningOrphans ? "Scanning…" : "Cleanup calendar"}
+              </button>
               <div className="flex-1" />
               {preview?.windowStartIso && (
                 <span className="text-xs text-slate-500">
@@ -367,6 +675,22 @@ export function App() {
             ) : (
               preview && (
                 <>
+                  {selectedKeys.size > 0 && (
+                    <BulkActionBar
+                      selectedCount={selectedKeys.size}
+                      proposedSelectedCount={proposedSelectedKeys.length}
+                      existingSelectedCount={existingSelectedKeys.length}
+                      selectedKeys={selectedArr}
+                      busy={bulkBusy}
+                      onClear={clearSelection}
+                      onSetShowAs={bulkSetShowAs}
+                      onSetStatus={bulkSetStatus}
+                      onSetDuration={bulkSetDuration}
+                      onConfirm={bulkConfirm}
+                      onCancel={bulkCancel}
+                      onReschedule={bulkReschedule}
+                    />
+                  )}
                   <SchedulePreview
                     blocks={preview.blocks}
                     existing={preview.existing}
@@ -381,6 +705,9 @@ export function App() {
                     onPickTime={(key) => setPickingFor(key)}
                     confirmingKeys={confirmingKeys}
                     savingDurationKeys={savingDurationKeys}
+                    selectedKeys={selectedKeys}
+                    onToggleKey={toggleKey}
+                    onToggleKeys={toggleKeys}
                   />
 
                   {preview.unscheduled.length > 0 && (

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ExistingEvent, ProposedBlock, Ticket } from "../types";
 import { StatusPill } from "./StatusPill";
 
@@ -39,6 +39,9 @@ export function SchedulePreview({
   onPickTime,
   confirmingKeys,
   savingDurationKeys,
+  selectedKeys,
+  onToggleKey,
+  onToggleKeys,
 }: {
   blocks: ProposedBlock[];
   existing: ExistingEvent[];
@@ -53,6 +56,9 @@ export function SchedulePreview({
   onPickTime: (jiraKey: string) => void;
   confirmingKeys: Set<string>;
   savingDurationKeys: Set<string>;
+  selectedKeys: Set<string>;
+  onToggleKey: (jiraKey: string, selected: boolean) => void;
+  onToggleKeys: (jiraKeys: string[], selected: boolean) => void;
 }) {
   const ticketByKey = useMemo(() => {
     const m = new Map<string, Ticket>();
@@ -104,10 +110,24 @@ export function SchedulePreview({
     );
   }
 
+  const allKeys = grouped.flatMap(([, rows]) =>
+    rows.map((r) => (r.kind === "proposed" ? r.block.jiraKey : r.event.jiraKey)),
+  );
+  const allSelected = allKeys.length > 0 && allKeys.every((k) => selectedKeys.has(k));
+  const someSelected = !allSelected && allKeys.some((k) => selectedKeys.has(k));
+
   return (
     <div className="border rounded-lg bg-white">
       <header className="flex items-center justify-between px-4 py-3 border-b">
-        <h3 className="text-sm font-semibold text-slate-700">Schedule</h3>
+        <div className="flex items-center gap-3">
+          <TriCheckbox
+            checked={allSelected}
+            indeterminate={someSelected}
+            onChange={(checked) => onToggleKeys(allKeys, checked)}
+            title={allSelected ? "Clear selection" : "Select all"}
+          />
+          <h3 className="text-sm font-semibold text-slate-700">Schedule</h3>
+        </div>
         <div className="flex items-center gap-2">
           <span className="text-xs text-slate-500 mr-2">Mark all proposed:</span>
           <button
@@ -125,43 +145,89 @@ export function SchedulePreview({
         </div>
       </header>
       <div className="divide-y">
-        {grouped.map(([day, rows]) => (
-          <div key={day} className="px-4 py-3">
-            <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
-              {day}
-            </h4>
-            <ul className="space-y-1.5">
-              {rows.map((r, idx) =>
-                r.kind === "proposed" ? (
-                  <ProposedRow
-                    key={`p-${idx}-${r.block.jiraKey}`}
-                    row={r}
-                    onChangeShowAs={onChangeShowAs}
-                    onChangeStatus={onChangeStatus}
-                    onChangeDuration={onChangeDuration}
-                    onError={onError}
-                    onConfirm={onConfirmBlock}
-                    onDelete={onDeleteExisting}
-                    onPickTime={onPickTime}
-                    isConfirming={confirmingKeys.has(r.block.jiraKey)}
-                    isSavingDuration={savingDurationKeys.has(r.block.jiraKey)}
-                  />
-                ) : (
-                  <ExistingRow
-                    key={`e-${idx}-${r.event.jiraKey}`}
-                    row={r}
-                    onChangeStatus={onChangeStatus}
-                    onError={onError}
-                    onDelete={onDeleteExisting}
-                    onPickTime={onPickTime}
-                  />
-                ),
-              )}
-            </ul>
-          </div>
-        ))}
+        {grouped.map(([day, rows]) => {
+          const dayKeys = rows.map((r) =>
+            r.kind === "proposed" ? r.block.jiraKey : r.event.jiraKey,
+          );
+          const dayAll = dayKeys.length > 0 && dayKeys.every((k) => selectedKeys.has(k));
+          const daySome = !dayAll && dayKeys.some((k) => selectedKeys.has(k));
+          return (
+            <div key={day} className="px-4 py-3">
+              <div className="flex items-center gap-2 mb-2">
+                <TriCheckbox
+                  checked={dayAll}
+                  indeterminate={daySome}
+                  onChange={(checked) => onToggleKeys(dayKeys, checked)}
+                  title={dayAll ? "Clear day" : "Select day"}
+                />
+                <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                  {day}
+                </h4>
+              </div>
+              <ul className="space-y-1.5">
+                {rows.map((r, idx) =>
+                  r.kind === "proposed" ? (
+                    <ProposedRow
+                      key={`p-${idx}-${r.block.jiraKey}`}
+                      row={r}
+                      onChangeShowAs={onChangeShowAs}
+                      onChangeStatus={onChangeStatus}
+                      onChangeDuration={onChangeDuration}
+                      onError={onError}
+                      onConfirm={onConfirmBlock}
+                      onDelete={onDeleteExisting}
+                      onPickTime={onPickTime}
+                      isConfirming={confirmingKeys.has(r.block.jiraKey)}
+                      isSavingDuration={savingDurationKeys.has(r.block.jiraKey)}
+                      isSelected={selectedKeys.has(r.block.jiraKey)}
+                      onToggleSelected={(s) => onToggleKey(r.block.jiraKey, s)}
+                    />
+                  ) : (
+                    <ExistingRow
+                      key={`e-${idx}-${r.event.jiraKey}`}
+                      row={r}
+                      onChangeStatus={onChangeStatus}
+                      onError={onError}
+                      onDelete={onDeleteExisting}
+                      onPickTime={onPickTime}
+                      isSelected={selectedKeys.has(r.event.jiraKey)}
+                      onToggleSelected={(s) => onToggleKey(r.event.jiraKey, s)}
+                    />
+                  ),
+                )}
+              </ul>
+            </div>
+          );
+        })}
       </div>
     </div>
+  );
+}
+
+function TriCheckbox({
+  checked,
+  indeterminate,
+  onChange,
+  title,
+}: {
+  checked: boolean;
+  indeterminate: boolean;
+  onChange: (checked: boolean) => void;
+  title?: string;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = indeterminate && !checked;
+  }, [indeterminate, checked]);
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={checked}
+      onChange={(e) => onChange(e.currentTarget.checked)}
+      title={title}
+      className="h-3.5 w-3.5 rounded border-slate-300 text-slate-900 focus:ring-slate-400 cursor-pointer"
+    />
   );
 }
 
@@ -213,6 +279,8 @@ function ProposedRow({
   onPickTime,
   isConfirming,
   isSavingDuration,
+  isSelected,
+  onToggleSelected,
 }: {
   row: Extract<Row, { kind: "proposed" }>;
   onChangeShowAs: (key: string, showAs: "free" | "busy") => void;
@@ -224,6 +292,8 @@ function ProposedRow({
   onPickTime: (key: string) => void;
   isConfirming: boolean;
   isSavingDuration: boolean;
+  isSelected: boolean;
+  onToggleSelected: (selected: boolean) => void;
 }) {
   const { block, ticket, previousStartIso } = row;
   const start = new Date(block.startUtcIso);
@@ -241,7 +311,14 @@ function ProposedRow({
     ? `Moved from ${timeFmt.format(new Date(previousStartIso))} on ${dayFmtShort(previousStartIso)}`
     : undefined;
   return (
-    <li className="flex items-start gap-3 py-1.5">
+    <li className={`flex items-start gap-3 py-1.5 -mx-2 px-2 rounded ${isSelected ? "bg-sky-50" : ""}`}>
+      <input
+        type="checkbox"
+        checked={isSelected}
+        onChange={(e) => onToggleSelected(e.currentTarget.checked)}
+        className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-slate-900 focus:ring-slate-400 cursor-pointer shrink-0"
+        title={isSelected ? "Deselect" : "Select"}
+      />
       <button
         type="button"
         onClick={() => onPickTime(block.jiraKey)}
@@ -319,18 +396,29 @@ function ExistingRow({
   onError,
   onDelete,
   onPickTime,
+  isSelected,
+  onToggleSelected,
 }: {
   row: Extract<Row, { kind: "existing" }>;
   onChangeStatus: (key: string, status: string) => void;
   onError: (msg: string) => void;
   onDelete: (key: string) => void;
   onPickTime: (key: string) => void;
+  isSelected: boolean;
+  onToggleSelected: (selected: boolean) => void;
 }) {
   const { event, ticket } = row;
   const start = new Date(event.startUtcIso);
   const end = new Date(event.endUtcIso);
   return (
-    <li className="flex items-start gap-3 py-1.5">
+    <li className={`flex items-start gap-3 py-1.5 -mx-2 px-2 rounded ${isSelected ? "bg-sky-50" : ""}`}>
+      <input
+        type="checkbox"
+        checked={isSelected}
+        onChange={(e) => onToggleSelected(e.currentTarget.checked)}
+        className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-slate-900 focus:ring-slate-400 cursor-pointer shrink-0"
+        title={isSelected ? "Deselect" : "Select"}
+      />
       <button
         type="button"
         onClick={() => onPickTime(event.jiraKey)}

@@ -1072,6 +1072,75 @@ syncRouter.post("/reschedule", async (_req, res) => {
   }
 });
 
+syncRouter.get("/orphans", async (_req, res) => {
+  try {
+    if (!isSignedIn()) {
+      res.status(401).json({ error: "Not signed in to Microsoft" });
+      return;
+    }
+    const settings = readSettings();
+    const windowStartIso = DateTime.utc().minus({ days: 1 }).toISO()!;
+    const windowEndIso = DateTime.utc()
+      .plus({ days: settings.lookaheadBusinessDays + 7 })
+      .toISO()!;
+    const live = await listMyJiraEventsInWindow(windowStartIso, windowEndIso);
+    const tracked = db
+      .prepare("SELECT graph_event_id FROM events")
+      .all() as { graph_event_id: string }[];
+    const trackedIds = new Set(tracked.map((r) => r.graph_event_id));
+    const orphans = live
+      .filter((ev) => !trackedIds.has(ev.id))
+      .map((ev) => ({
+        graphEventId: ev.id,
+        jiraKey: ev.jiraKey,
+        startUtcIso: ev.startUtcIso,
+        endUtcIso: ev.endUtcIso,
+        showAs: ev.showAs,
+      }));
+    res.json({
+      orphans,
+      windowStartIso,
+      windowEndIso,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+const OrphansDeleteSchema = z.object({
+  graphEventIds: z.array(z.string().min(1)).min(1),
+});
+
+syncRouter.post("/orphans/delete", async (req, res) => {
+  try {
+    if (!isSignedIn()) {
+      res.status(401).json({ error: "Not signed in to Microsoft" });
+      return;
+    }
+    const { graphEventIds } = OrphansDeleteSchema.parse(req.body);
+    let removed = 0;
+    const failed: { graphEventId: string; error: string }[] = [];
+    for (const id of graphEventIds) {
+      try {
+        await deleteEvent(id);
+        removed += 1;
+      } catch (err: any) {
+        const msg = String(err?.message ?? "");
+        if (/Graph (404|410)/.test(msg)) {
+          removed += 1;
+          continue;
+        }
+        failed.push({ graphEventId: id, error: msg });
+      }
+      // Also drop any stale DB row that happened to share this id.
+      db.prepare("DELETE FROM events WHERE graph_event_id = ?").run(id);
+    }
+    res.json({ removed, failed });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 syncRouter.delete("/event/:jiraKey", async (req, res) => {
   try {
     const row = db
@@ -1083,7 +1152,15 @@ syncRouter.delete("/event/:jiraKey", async (req, res) => {
     }
     try {
       await deleteEvent(row.graph_event_id);
-    } catch {
+    } catch (err: any) {
+      const msg = String(err?.message ?? "");
+      // Only treat "already gone" responses as success; for everything else
+      // (throttling, network, etc.) leave the DB row alone and surface the
+      // error so the client can retry.
+      if (!/Graph (404|410)/.test(msg)) {
+        res.status(502).json({ error: msg || "graph_delete_failed" });
+        return;
+      }
     }
     db.prepare("DELETE FROM events WHERE jira_key = ?").run(req.params.jiraKey);
     res.json({ ok: true });

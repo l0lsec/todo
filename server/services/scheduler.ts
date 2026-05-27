@@ -9,6 +9,7 @@ export type TicketForScheduling = {
   estimateSeconds: number | null;
   priorityRank: number;
   createdIso: string;
+  inProgress: boolean;
   existingGraphEventId?: string | null;
   existingShowAs?: "free" | "busy" | null;
 };
@@ -150,6 +151,7 @@ export function planSchedule(opts: {
   const now = (opts.now ?? DateTime.utc()).toUTC();
 
   const sorted = [...opts.tickets].sort((a, b) =>
+    Number(b.inProgress) - Number(a.inProgress) ||
     a.priorityRank - b.priorityRank ||
     a.createdIso.localeCompare(b.createdIso) ||
     a.key.localeCompare(b.key),

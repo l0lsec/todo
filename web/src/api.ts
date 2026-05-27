@@ -82,6 +82,27 @@ export const api = {
   deleteScheduled: (jiraKey: string) =>
     jfetch<{ ok: true }>(`/api/sync/event/${encodeURIComponent(jiraKey)}`, { method: "DELETE" }),
 
+  listOrphans: () =>
+    jfetch<{
+      orphans: {
+        graphEventId: string;
+        jiraKey: string;
+        startUtcIso: string;
+        endUtcIso: string;
+        showAs: "free" | "busy";
+      }[];
+      windowStartIso: string;
+      windowEndIso: string;
+    }>("/api/sync/orphans"),
+  deleteOrphans: (graphEventIds: string[]) =>
+    jfetch<{
+      removed: number;
+      failed: { graphEventId: string; error: string }[];
+    }>("/api/sync/orphans/delete", {
+      method: "POST",
+      body: JSON.stringify({ graphEventIds }),
+    }),
+
   setEstimate: (jiraKey: string, minutes: number) =>
     jfetch<{ ok: true }>(`/api/tickets/${encodeURIComponent(jiraKey)}/estimate`, {
       method: "PUT",
