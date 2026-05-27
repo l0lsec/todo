@@ -12,6 +12,8 @@ export type TicketForScheduling = {
   inProgress: boolean;
   existingGraphEventId?: string | null;
   existingShowAs?: "free" | "busy" | null;
+  existingStartIso?: string | null;
+  existingEndIso?: string | null;
 };
 
 export type ProposedBlock = {
@@ -146,16 +148,11 @@ export function planSchedule(opts: {
   busy: BusyInterval[];
   settings: Settings;
   now?: DateTime;
+  anchorExisting?: boolean;
 }): ScheduleResult {
   const { busy, settings } = opts;
   const now = (opts.now ?? DateTime.utc()).toUTC();
-
-  const sorted = [...opts.tickets].sort((a, b) =>
-    Number(b.inProgress) - Number(a.inProgress) ||
-    a.priorityRank - b.priorityRank ||
-    a.createdIso.localeCompare(b.createdIso) ||
-    a.key.localeCompare(b.key),
-  );
+  const anchorExisting = opts.anchorExisting !== false;
 
   const windows = buildWorkingWindows(settings, now);
   const busyIntervals = busyToIntervals(busy, settings);
@@ -165,6 +162,44 @@ export function planSchedule(opts: {
 
   const blocks: ProposedBlock[] = [];
   const unscheduled: { jiraKey: string; reason: string }[] = [];
+  const anchoredKeys = new Set<string>();
+
+  if (anchorExisting) {
+    for (const t of opts.tickets) {
+      if (!t.existingGraphEventId || !t.existingStartIso || !t.existingEndIso) continue;
+      const start = DateTime.fromISO(t.existingStartIso, { zone: "utc" });
+      const end = DateTime.fromISO(t.existingEndIso, { zone: "utc" });
+      if (!start.isValid || !end.isValid || end <= start) continue;
+      if (end <= now) continue;
+      const anchorInterval = Interval.fromDateTimes(start, end);
+      const durMin = Math.max(1, Math.round(end.diff(start, "minutes").minutes));
+      blocks.push({
+        jiraKey: t.key,
+        projectKey: t.projectKey,
+        summary: t.summary,
+        startUtcIso: t.existingStartIso,
+        endUtcIso: t.existingEndIso,
+        durationMin: durMin,
+        showAs: t.existingShowAs ?? settings.defaultShowAs,
+        priorityRank: t.priorityRank,
+        existingGraphEventId: t.existingGraphEventId,
+        existingShowAs: t.existingShowAs ?? null,
+      });
+      free = subtractIntervals(free, [anchorInterval]).filter(
+        (i) => i.length("minutes") >= settings.minSlotMinutes,
+      );
+      anchoredKeys.add(t.key);
+    }
+  }
+
+  const sorted = [...opts.tickets]
+    .filter((t) => !anchoredKeys.has(t.key))
+    .sort((a, b) =>
+      Number(b.inProgress) - Number(a.inProgress) ||
+      a.priorityRank - b.priorityRank ||
+      a.createdIso.localeCompare(b.createdIso) ||
+      a.key.localeCompare(b.key),
+    );
 
   for (const t of sorted) {
     const durMin = durationFor(t, settings);

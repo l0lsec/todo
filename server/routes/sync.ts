@@ -170,6 +170,8 @@ function buildSchedulingInput(
       inProgress: t.status === "In Progress",
       existingGraphEventId: ev?.graph_event_id ?? null,
       existingShowAs: ev?.show_as ?? null,
+      existingStartIso: ev?.start_utc ?? null,
+      existingEndIso: ev?.end_utc ?? null,
     };
   });
 }
@@ -525,6 +527,7 @@ export async function runRescheduleSweep(): Promise<{
     tickets: ticketsForScheduling,
     busy: replannableBusy,
     settings,
+    anchorExisting: false,
   });
 
   const previousByKey = new Map<string, EventRow>();
@@ -791,6 +794,7 @@ syncRouter.post("/schedule-one", async (req, res) => {
       tickets: [single],
       busy: replannableBusy,
       settings: extendedSettings,
+      anchorExisting: false,
     });
     const block = result.blocks[0];
     if (!block) {
