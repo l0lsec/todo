@@ -721,7 +721,15 @@ export function App() {
                         </span>
                       </header>
                       <ul className="divide-y">
-                        {preview.unscheduled.map((u) => {
+                        {[...preview.unscheduled]
+                          .sort((a, b) => {
+                            const ta = preview.tickets.find((x) => x.key === a.jiraKey);
+                            const tb = preview.tickets.find((x) => x.key === b.jiraKey);
+                            const ia = ta?.status === "In Progress" ? 0 : 1;
+                            const ib = tb?.status === "In Progress" ? 0 : 1;
+                            return ia - ib;
+                          })
+                          .map((u) => {
                           const t = preview.tickets.find((x) => x.key === u.jiraKey);
                           const isForcing = forcingKeys.has(u.jiraKey);
                           const isPicking = pickingKeys.has(u.jiraKey);

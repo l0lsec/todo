@@ -167,6 +167,7 @@ function buildSchedulingInput(
       estimateSeconds: t.estimateSeconds,
       priorityRank: priorityRank(t.priority, settings.priorityRanks),
       createdIso: t.created,
+      inProgress: t.status === "In Progress",
       existingGraphEventId: ev?.graph_event_id ?? null,
       existingShowAs: ev?.show_as ?? null,
     };
@@ -777,6 +778,7 @@ syncRouter.post("/schedule-one", async (req, res) => {
       estimateSeconds: ticket.estimateSeconds,
       priorityRank: priorityRank(ticket.priority, settings.priorityRanks),
       createdIso: ticket.created,
+      inProgress: ticket.status === "In Progress",
       existingGraphEventId: resolved?.graphEventId ?? null,
       existingShowAs: resolved?.showAs ?? null,
     };
